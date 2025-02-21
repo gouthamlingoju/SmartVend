@@ -6,6 +6,7 @@ export default function VendingMachine() {
   const [showPopup, setShowPopup] = useState(false);
   const [isDispensing, setIsDispensing] = useState(false); // New state for dispensing simulation
   const [dispensedPads, setDispensedPads] = useState(0); // To track how many pads are dispensed
+  const machineID="B-123";
 
   const handleIncrement = () => {
     if (selectedPads < 5 && selectedPads < availablePads) {
@@ -82,7 +83,7 @@ export default function VendingMachine() {
                 const lowStockResponse = await fetch('http://localhost:5000/low-stock-alert', {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ message: "Pads are low in stock. Please restock." }),
+                  body: JSON.stringify({ message: "Pads are low in stock. Please restock.", machineID , Remaining: (availablePads-selectedPads) } ),
                 });
 
                 const lowStockData = await lowStockResponse.json();
@@ -128,7 +129,7 @@ export default function VendingMachine() {
         <div className="grid grid-cols-1 text-center gap-4 mb-4">
           <div className="p-3 bg-gray-100 rounded-lg">
             <p className="text-gray-500 text-sm">Machine ID</p>
-            <p className="font-bold">B-123</p>
+            <p className="font-bold">{machineID}</p>
           </div>
         </div>
 
