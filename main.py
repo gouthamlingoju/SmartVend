@@ -63,6 +63,9 @@ def verify_payment():
 
 @app.route('/low-stock-alert', methods=['POST'])
 def send_mail():
+    data= request.json
+    machineID=data.get("machineID")
+    Remaining=data.get("Remaining")
     # Setup the server and port
     smtp_server = 'smtp.gmail.com'
     smtp_port = 587  # For TLS
@@ -76,7 +79,7 @@ def send_mail():
 
     # Create the email content
     subject = 'Refill needed'
-    body = 'Pads count is too low'
+    body = f'Pads count is too low in machine {machineID} \n Pads Left: {Remaining}'
 
     # Set up the MIME
     msg = MIMEMultipart()

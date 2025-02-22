@@ -1,54 +1,101 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+// import { updatePadsCount } from "./Firebase";
 
 export default function VendingMachine() {
-  const [availablePads, setAvailablePads] = useState(6);
+  const [availablePads, setAvailablePads] = useState(9);
   const [selectedPads, setSelectedPads] = useState(1);
   const [showPopup, setShowPopup] = useState(false);
-  const [isDispensing, setIsDispensing] = useState(false); // New state for dispensing simulation
-  const [dispensedPads, setDispensedPads] = useState(0); // To track how many pads are dispensed
+  const [showAdminPopup, setShowAdminPopup] = useState(false);
   const [adminPassword, setAdminPassword] = useState("");
   const [isAdminAuthenticated, setIsAdminAuthenticated] = useState(false);
-  const [showAdminPopup, setShowAdminPopup] = useState(false);
-  const [adminAction, setAdminAction] = useState("add");
-  const [newPadCount, setNewPadCount] = useState(""); // "add" or "set"
+  const [newPadCount, setNewPadCount] = useState("");
+  const [adminAction, setAdminAction] = useState("add"); // "add" or "set"
   const machineID="B-123";
 
-  const handleIncrement = () => {
-    if (selectedPads < 5 && selectedPads < availablePads) {
-      setSelectedPads(selectedPads + 1);
-    }
-  };
 
+//   useEffect(() => {
+//     // Load Razorpay script dynamically
+//     const script = document.createElement("script");
+//     script.src = "https://checkout.razorpay.com/v1/checkout.js";
+//     script.async = true;
+//     document.body.appendChild(script);
 
-  const handleDecrement = () => {
-    if (selectedPads > 1) {
-      setSelectedPads(selectedPads - 1);
-    }
-  };
+//     // Check inventory level and send alert if necessary
+//     if (availablePads < 5) {
+//       sendLowInventoryAlert();
+//     }
 
-  const handleAdminSubmit = () => {
-      if (adminPassword === "admin123") { // Replace with secure authentication
-        setIsAdminAuthenticated(true);
-      } else {
-        alert("Incorrect password");
-      }
-    };
-  
-    
-  
-    const handleUpdatePads = () => {
-      if (adminAction === "add") {
-        setAvailablePads((prev) => prev + parseInt(newPadCount));
-      } else {
-        setAvailablePads(parseInt(newPadCount));
-      }
-      // updatePadsCount(availablePads); // Update in Firebase
-      setShowAdminPopup(false);
-      setIsAdminAuthenticated(false);
-      setNewPadCount("");
-    };
+//     return () => {
+//       // Cleanup script on component unmount
+//       document.body.removeChild(script);
+//     };
+//   }, [availablePads]);
 
-  const handlePayment = async () => {
+//   const sendLowInventoryAlert = async () => {
+//     try {
+//       const response = await fetch('http://localhost:5000/send-email', {
+//         method: 'POST',
+//         headers: {
+//           'Content-Type': 'application/json',
+//         },
+//         body: JSON.stringify({
+//           email: "test@example.com",
+//           subject: "Low Inventory Alert",
+//           body: "The inventory of pads is running low. Please restock soon.",
+//         }),
+//       });
+
+//       const data = await response.json();
+//       if (response.ok) {
+//         console.log("Email sent successfully:", data.message);
+//       } else {
+//         console.error("Error from server:", data.error);
+//       }
+//     } catch (error) {
+//       console.error("Error sending email:", error);
+//     }
+//   };
+
+//   const handlePayment = async () => {
+//     try {
+//       const response = await fetch('http://localhost:5000/create-order', {
+//         method: 'POST',
+//         headers: {
+//           'Content-Type': 'application/json',
+//         },
+//         body: JSON.stringify({ amount: selectedPads * 500 }), // Assuming 500 is the amount in paise (e.g., 5 INR)
+//       });
+
+//       const data = await response.json();
+//       if (!response.ok) throw new Error(data.error || "Failed to create order");
+
+//       const options = {
+//         key: "rzp_test_ZEcyPeIGYJzIxT",
+//         amount: data.amount,
+//         currency: "INR",
+//         name: "Smart Vend",
+//         description: `Purchase of ${selectedPads} sanitary pad${selectedPads > 1 ? 's' : ''}`,
+//         order_id: data.order_id,
+//         handler: async function (response) {
+//           console.log("Payment Successful:", response);
+//           setAvailablePads((prev) => prev - selectedPads);
+//           setShowPopup(true);
+//         },
+//         prefill: {
+//           name: "Customer",
+//           email: "customer@example.com",
+//           contact: "9948587314",
+//         },
+//         theme: { color: "#8b5cf6" },
+//       };
+
+//       const rzp1 = new window.Razorpay(options);
+//       rzp1.open();
+//     } catch (error) {
+//       console.error("Error initializing Razorpay:", error);
+//     }
+//   };
+const handlePayment = async () => {
     try {
       console.log("Payment button clicked! Pads selected: ", selectedPads);
 
@@ -144,97 +191,42 @@ export default function VendingMachine() {
     }
   };
 
+
+  const handleAdminSubmit = () => {
+    if (adminPassword === "admin123") { // Replace with secure authentication
+      setIsAdminAuthenticated(true);
+    } else {
+      alert("Incorrect password");
+    }
+  };
+
+  
+
+  const handleUpdatePads = () => {
+    if (adminAction === "add") {
+      setAvailablePads((prev) => prev + parseInt(newPadCount));
+    } else {
+      setAvailablePads(parseInt(newPadCount));
+    }
+    updatePadsCount(availablePads); // Update in Firebase
+    setShowAdminPopup(false);
+    setIsAdminAuthenticated(false);
+    setNewPadCount("");
+  };
+
+  const handleDecrement = () => {
+    if (selectedPads > 1) {
+      setSelectedPads((prev) => prev - 1);
+    }
+  };
+
+  const handleIncrement = () => {
+    if (selectedPads < availablePads && selectedPads < 5) {
+      setSelectedPads((prev) => prev + 1);
+    }
+  };
+
   return (
-    // <div className="min-h-screen flex flex-col items-center justify-center bg-purple-100 p-6">
-    //   <button
-    //     className="absolute top-4 right-4 bg-gray-700 hover:bg-gray-800 text-white px-4 py-2 rounded-lg transition-colors duration-200 shadow-md flex items-center space-x-2"
-    //     onClick={() => setShowAdminPopup(true)}
-    //     aria-label="Open Admin Portal"
-    //   >
-    //     <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-    //       <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-6-3a2 2 0 11-4 0 2 2 0 014 0zm-2 4a5 5 0 00-4.546 2.916A5.986 5.986 0 005 16a5 5 0 0010 0c0-1.139-.321-2.203-.874-3.108A5.001 5.001 0 0010 11z" clipRule="evenodd" />
-    //     </svg>
-    //     <span>Admin</span>
-    //   </button>
-
-    //   <h1 className="text-3xl font-bold text-purple-700">Smart Vend</h1>
-    //   <p className="text-sm text-purple-500 mb-6">Hygiene Products Dispenser</p>
-
-    //   <div
-    //     className={`w-96 p-6 rounded-xl shadow-md ${
-    //       availablePads < 5 ? "bg-red-100" : "bg-white"
-    //     }`}
-    //   >
-    //     <div className="grid grid-cols-1 text-center gap-4 mb-4">
-    //       <div className="p-3 bg-gray-100 rounded-lg">
-    //         <p className="text-gray-500 text-sm">Machine ID</p>
-    //         <p className="font-bold">{machineID}</p>
-    //       </div>
-    //     </div>
-
-    //     <p className="text-lg font-medium">
-    //       Pads Available: <span className="font-bold">{availablePads}</span>
-    //     </p>
-
-    //     <div className="flex items-center justify-between mt-3">
-    //       <p className="text-lg font-medium">Pads Selected:</p>
-    //       <div className="flex items-center">
-    //         <button
-    //           className="w-8 h-8 bg-gray-300 text-black rounded-md"
-    //           onClick={handleDecrement}
-    //         >
-    //           -
-    //         </button>
-    //         <p className="mx-4">{selectedPads}</p>
-    //         <button
-    //           className="w-8 h-8 bg-gray-300 text-black rounded-md"
-    //           onClick={handleIncrement}
-    //         >
-    //           +
-    //         </button>
-    //       </div>
-    //     </div>
-
-    //     <p className="text-xl font-bold mt-4">Total Price: ₹{selectedPads * 5}</p>
-
-    //     {availablePads > 0 && selectedPads <= availablePads && (
-    //       <button
-    //         onClick={handlePayment}
-    //         className="bg-blue-500 text-white py-2 px-4 rounded hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
-    //       >
-    //         Pay Here
-    //       </button>
-    //     )}
-    //   </div>
-
-    //   {/* Dispensing Simulation */}
-    //   {isDispensing && (
-    //     <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-50">
-    //       <div className="bg-white p-6 rounded-lg shadow-lg text-center">
-    //         <h2 className="text-xl font-bold text-yellow-600">Dispensing Pads...</h2>
-    //         <p className="text-gray-600">{dispensedPads} / {selectedPads} Pad(s) dispensed</p>
-    //       </div>
-    //     </div>
-    //   )}
-
-    //   {/* Payment Success Popup */}
-    //   {showPopup && (
-    //     <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-50">
-    //       <div className="bg-white p-6 rounded-lg shadow-lg text-center">
-    //         <h2 className="text-xl font-bold text-green-600">Payment Successful!</h2>
-    //         <p className="text-gray-600">{selectedPads} Pad(s) dispensed successfully!!</p>
-    //         <button
-    //           className="mt-4 bg-green-600 text-white px-4 py-2 rounded-md"
-    //           onClick={() => {setShowPopup(false);
-    //             setSelectedPads(1);
-    //           }}
-    //         >
-    //           OK
-    //         </button>
-    //       </div>
-    //     </div>
-    //   )}
-    // </div>
     <div className="min-h-screen flex flex-col bg-gradient-to-b from-purple-50 to-purple-100 p-6 relative">
       {/* Admin button */}
       <button
@@ -276,7 +268,6 @@ export default function VendingMachine() {
               <span className="font-bold text-purple-800">{availablePads}</span>
             </div>
           </div>
-          
 
           {availablePads < 3 && (
             <div className="mt-2 text-sm text-amber-600 flex items-center">
@@ -449,22 +440,10 @@ export default function VendingMachine() {
             <p className="text-gray-600 mb-6">Please collect your {selectedPads} pad{selectedPads > 1 ? 's' : ''} from the dispenser.</p>
             <button
               className="bg-purple-600 hover:bg-purple-700 text-white px-6 py-3 rounded-md transition-colors duration-200 w-full"
-              onClick={() => {setShowPopup(false);
-                setSelectedPads(1);
-              }}
+              onClick={() => setShowPopup(false)}
             >
               Done
             </button>
-          </div>
-        </div>
-      )}
-
-   {/* Dispensing Simulation */}
-       {isDispensing && (
-        <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-50">
-          <div className="bg-white p-6 rounded-lg shadow-lg text-center">
-            <h2 className="text-xl font-bold text-yellow-600">Dispensing Pads...</h2>
-            <p className="text-gray-600">{dispensedPads} / {selectedPads} Pad(s) dispensed</p>
           </div>
         </div>
       )}
