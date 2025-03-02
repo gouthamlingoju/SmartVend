@@ -1,7 +1,7 @@
 import { useState } from "react";
 
 export default function VendingMachine() {
-  const [availablePads, setAvailablePads] = useState(6);
+  const [availablePads, setAvailablePads] = useState(8);
   const [selectedPads, setSelectedPads] = useState(1);
   const [showPopup, setShowPopup] = useState(false);
   const [isDispensing, setIsDispensing] = useState(false); // New state for dispensing simulation
