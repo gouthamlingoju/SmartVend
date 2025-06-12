@@ -42,9 +42,8 @@ export default function VendingMachine({ machine, onBack }) {
       });
       const data = await response.json();
       const { order_id, amount, currency } = data;
-      console.log("ID:",RAZORPAY_KEY_ID );
       const options = {
-        key: "rzp_test_ZEcyPeIGYJzIxT",
+        key: RAZORPAY_KEY_ID,
         amount: amount,
         currency: currency,
         name: "SmartVend",
