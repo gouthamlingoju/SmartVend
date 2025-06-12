@@ -1,0 +1,92 @@
+[
+  {
+    "id": "VM001",
+    "location": "Lobby",
+    "status": "active",
+    "stock": 120
+  },
+  {
+    "id": "VM002",
+    "location": "Cafeteria",
+    "status": "maintenance",
+    "stock": 45
+  },
+  {
+    "id": "VM003",
+    "location": "Parking Lot",
+    "status": "active",
+    "stock": 80
+  },
+  {
+    "id": "VM004",
+    "location": "Library",
+    "status": "maintenance",
+    "stock": 60
+  },
+  {
+    "id": "VM005",
+    "location": "Main Entrance",
+    "status": "active",
+    "stock": 100
+  },
+  {
+    "id": "VM006",
+    "location": "Hostel Block A",
+    "status": "active",
+    "stock": 75
+  },
+  {
+    "id": "VM007",
+    "location": "Hostel Block B",
+    "status": "active",
+    "stock": 90
+  },
+  {
+    "id": "VM008",
+    "location": "Sports Complex",
+    "status": "active",
+    "stock": 55
+  },
+  {
+    "id": "VM009",
+    "location": "Auditorium",
+    "status": "active",
+    "stock": 70
+  },
+  {
+    "id": "VM010",
+    "location": "Admin Office",
+    "status": "active",
+    "stock": 65
+  },
+  {
+    "id": "VM011",
+    "location": "Faculty Room",
+    "status": "active",
+    "stock": 50
+  },
+  {
+    "id": "VM012",
+    "location": "Medical Room",
+    "status": "active",
+    "stock": 40
+  },
+  {
+    "id": "VM013",
+    "location": "Workshop Area",
+    "status": "active",
+    "stock": 85
+  },
+  {
+    "id": "VM014",
+    "location": "Seminar Hall",
+    "status": "active",
+    "stock": 60
+  },
+  {
+    "id": "VM015",
+    "location": "Garden Area",
+    "status": "active",
+    "stock": 30
+  }
+]

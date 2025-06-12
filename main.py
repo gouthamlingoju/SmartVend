@@ -5,15 +5,20 @@ from flask_cors import CORS
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+import serial
+import time
+
 
 app = Flask(__name__)
 
+
+
+def Blink(number):
+    command = f'{number}\n'
+    arduino.write(command.encode())
+
 # Allow all origins or specify the frontend origin explicitly
 CORS(app, resources={r"/*": {"origins": "http://localhost:5173"}})
-
-# Replace with your Razorpay API Keys
-# RAZORPAY_KEY_ID = "your_razorpay_key_id"
-# RAZORPAY_KEY_SECRET = "your_razorpay_key_secret"
 
 razorpay_client = razorpay.Client(auth=(os.getenv("RAZORPAY_KEY_ID"), os.getenv("RAZORPAY_SECRET_KEY")))
 
@@ -118,5 +123,22 @@ def send_mail():
     return jsonify({"message": s})
 
 
+@app.route('/blink', methods=['POST'])
+def blink():
+    data = request.get_json()
+    count = data.get('number', 0)
+    if count:
+        Blink(count)
+        return {"status": "ok", "message": f"Blinked {count} times"}
+    else:
+        return {"status": "error", "message": "Invalid input"}, 400
+
 if __name__ == "__main__":
-    app.run(debug=True)
+    try:
+        arduino = serial.Serial(port='COM7', baudrate=9600, timeout=1)
+        time.sleep(2)
+        print("Arduino connected successfully on COM7")
+    except Exception as e:
+        print(f"Arduino connection failed: {e}")
+    # 🔧 THIS LINE FIXES THE ISSUE:
+    app.run(debug=True, use_reloader=False)
