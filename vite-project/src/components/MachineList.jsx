@@ -1,7 +1,10 @@
 import React, { useState } from 'react';
 
+import { useNavigate } from 'react-router-dom';
+
 export default function MachineList({ machines, onSelect }) {
   const [search, setSearch] = useState("");
+  const navigate = useNavigate();
   const filteredMachines = machines.filter(machine => {
     const location = machine.location || '';
     const id = machine.id || machine.machine_id || '';
@@ -18,7 +21,17 @@ export default function MachineList({ machines, onSelect }) {
   };
   return (
     <div className="min-h-screen bg-gradient-to-br from-purple-200 via-blue-100 to-pink-100 p-8">
+        <button
+          className="mb-6 bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg transition-colors duration-200 shadow-md flex items-center space-x-2"
+          onClick={() => navigate('/')}
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2" viewBox="0 0 20 20" fill="currentColor">
+            <path fillRule="evenodd" d="M7.707 14.707a1 1 0 01-1.414 0l-5-5a1 1 0 010-1.414l5-5a1 1 0 111.414 1.414L4.414 8H17a1 1 0 110 2H4.414l3.293 3.293a1 1 0 010 1.414z" clipRule="evenodd" />
+          </svg>
+          <span>Back</span>
+        </button>
       <div className="max-w-4xl mx-auto">
+        
         <h1 className="text-3xl font-bold text-center mb-8 text-purple-700 drop-shadow">Select a Vending Machine</h1>
         <div className="flex justify-center mb-6">
           <input
