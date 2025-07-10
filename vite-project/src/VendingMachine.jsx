@@ -1,8 +1,8 @@
 import { useState } from "react";
 
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL;
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL1;
 const RAZORPAY_KEY_ID = import.meta.env.VITE_RAZORPAY_KEY_ID;
-
+console.log("RAZORPAY_KEY_ID:", RAZORPAY_KEY_ID);
 export default function VendingMachine({ machine, onBack }) {
   const [availablePads, setAvailablePads] = useState(machine.stock);
   const [selectedPads, setSelectedPads] = useState(1);
