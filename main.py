@@ -8,11 +8,17 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 import serial
 import time
+from dotenv import load_dotenv
+import httpx    
+
+
+# Load environment variables from .env file
+load_dotenv()
 
 app = FastAPI()
 
 # Allow all origins or specify the frontend origin explicitly
-origins = [os.getenv("VITE_FRONTEND_URL")]
+origins = [os.getenv("VITE_FRONTEND_URL"),"http://localhost:5173"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -21,7 +27,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-razorpay_client = razorpay.Client(auth=(os.getenv("RAZORPAY_KEY_ID"), os.getenv("RAZORPAY_SECRET_KEY")))
+# Get Razorpay credentials
+razorpay_key_id = os.getenv("RAZORPAY_KEY_ID")
+razorpay_secret_key = os.getenv("RAZORPAY_SECRET_KEY")
+
+# Debug: Print credentials (remove in production)
+print(f"Razorpay Key ID: {'Set' if razorpay_key_id else 'NOT SET'}")
+print(f"Razorpay Secret Key: {'Set' if razorpay_secret_key else 'NOT SET'}")
+
+if not razorpay_key_id or not razorpay_secret_key:
+    print("WARNING: Razorpay credentials not found in environment variables!")
+    print("Please set RAZORPAY_KEY_ID and RAZORPAY_SECRET_KEY")
+
+razorpay_client = razorpay.Client(auth=(razorpay_key_id, razorpay_secret_key))
 
 try:
     arduino = serial.Serial(port=os.getenv("ARDUINO_PORT", "COM7"), baudrate=9600, timeout=1)
@@ -39,13 +57,28 @@ def Blink(number):
 @app.post('/create-order')
 async def create_order(request: Request):
     try:
+        # Check if Razorpay credentials are set
+        if not razorpay_key_id or not razorpay_secret_key:
+            return JSONResponse(
+                {"error": "Razorpay credentials not configured. Please set RAZORPAY_KEY_ID and RAZORPAY_SECRET_KEY"}, 
+                status_code=500
+            )
+        
         data = await request.json()
         amount = data.get("amount")
+        
+        if not amount:
+            return JSONResponse({"error": "Amount is required"}, status_code=400)
+        
+        print(f"Creating order for amount: {amount}")
+        
         order = razorpay_client.order.create({
             "amount": amount,
             "currency": "INR",
             "payment_capture": 1
         })
+        
+        print(f"Order created successfully: {order}")
         return JSONResponse(order)
     except Exception as e:
         print(f"Error creating order: {e}")
@@ -103,6 +136,30 @@ async def send_mail(request: Request):
         server.quit()
     return {"message": s}
 
+@app.post('/dispense')
+async def dispense(request: Request):
+    try:
+        data = await request.json()
+        quantity = data.get('number', 1)
+
+        if quantity < 1 or quantity > 5:
+            return JSONResponse({"error": "Invalid quantity. Must be between 1 and 5"}, status_code=400)
+
+        esp32_ip = "http://192.168.94.105"  # replace with your actual IP
+        duration = quantity  # 1 item = 1 second of rotation, adjust logic as needed
+
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{esp32_ip}/forward", params={"n": duration}, timeout=10.0)
+
+        if response.status_code == 200:
+            return {"status": "success", "message": f"Dispensed for {duration} second(s)"}
+        else:
+            return JSONResponse({"error": "ESP32 failed to respond properly"}, status_code=500)
+
+    except Exception as e:
+        print(f"Error in dispense: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
 @app.post('/blink')
 async def blink(request: Request):
     data = await request.json()
@@ -112,5 +169,51 @@ async def blink(request: Request):
         return {"status": "ok", "message": f"Blinked {count} times"}
     else:
         return JSONResponse({"status": "error", "message": "Invalid input"}, status_code=400)
+
+@app.get('/hardware-status')
+async def get_hardware_status():
+    try:
+        if arduino:
+            arduino.write(b'STATUS\n')
+            arduino.timeout = 2
+            response = arduino.readline().decode().strip()
+            
+            if response.startswith('RESPONSE:STATUS:'):
+                parts = response.split(':')[1].split(',')
+                return {
+                    "machine_id": parts[0],
+                    "location": parts[1],
+                    "stock": int(parts[2]),
+                    "is_dispensing": parts[3] == "1",
+                    "hardware_connected": True
+                }
+            else:
+                return {"hardware_connected": False, "error": "No response from hardware"}
+        else:
+            return {"hardware_connected": False, "error": "Hardware not connected"}
+            
+    except Exception as e:
+        print(f"Error getting hardware status: {e}")
+        return {"hardware_connected": False, "error": str(e)}
+
+@app.get('/hardware-stock')
+async def get_hardware_stock():
+    try:
+        if arduino:
+            arduino.write(b'STOCK\n')
+            arduino.timeout = 2
+            response = arduino.readline().decode().strip()
+            
+            if response.startswith('RESPONSE:STOCK:'):
+                stock = int(response.split(':')[1])
+                return {"stock": stock, "hardware_connected": True}
+            else:
+                return {"hardware_connected": False, "error": "No response from hardware"}
+        else:
+            return {"hardware_connected": False, "error": "Hardware not connected"}
+            
+    except Exception as e:
+        print(f"Error getting hardware stock: {e}")
+        return {"hardware_connected": False, "error": str(e)}
 
 # To run: uvicorn main:app --reload

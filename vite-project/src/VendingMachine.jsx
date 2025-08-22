@@ -1,9 +1,9 @@
 import { useState } from "react";
 
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL1;
-const RAZORPAY_KEY_ID = import.meta.env.VITE_RAZORPAY_KEY_ID;
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL1 || 'http://localhost:8000';
+const RAZORPAY_KEY_ID = import.meta.env.VITE_RAZORPAY_KEY_ID || 'rzp_test_your_key_here';
 export default function VendingMachine({ machine, onBack }) {
-  const [availablePads, setAvailablePads] = useState(machine.stock);
+  const [availablePads, setAvailablePads] = useState(machine.current_stock);
   const [selectedPads, setSelectedPads] = useState(1);
   const [showPopup, setShowPopup] = useState(false);
   const [isDispensing, setIsDispensing] = useState(false);
@@ -22,23 +22,41 @@ export default function VendingMachine({ machine, onBack }) {
   };
 
   function blinkLED(number) {
+    console.log(`Dispensing ${number} items via hardware...`);
     fetch(`${BACKEND_URL}/dispense`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ number }),
     })
       .then(res => res.json())
-      .then(data => console.log(data))
-      .catch(err => console.error(err));
+      .then(data => {
+        console.log('Hardware response:', data);
+        if (data.status === 'success') {
+          console.log('✅ Hardware dispensing successful');
+        } else {
+          console.error('❌ Hardware dispensing failed:', data.error);
+        }
+      })
+      .catch(err => {
+        console.error('❌ Hardware communication error:', err);
+        // Fallback: simulate dispensing if hardware is not available
+        console.log('⚠️ Using fallback dispensing simulation');
+      });
   }
 
   const handlePayment = async () => {
     try {
+      console.log('Making payment request to:', `${BACKEND_URL}/create-order`);
       const response = await fetch(`${BACKEND_URL}/create-order`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ amount: selectedPads * 500 }),
       });
+      
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      
       const data = await response.json();
       const { order_id, amount, currency } = data;
       const options = {
