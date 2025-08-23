@@ -6,10 +6,7 @@ import os
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-import serial
-import time
 from dotenv import load_dotenv
-import httpx    
 import uvicorn
 
 
