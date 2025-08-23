@@ -1,7 +1,7 @@
 import { useState } from "react";
 
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL1 || 'http://localhost:8000';
-const RAZORPAY_KEY_ID = import.meta.env.VITE_RAZORPAY_KEY_ID || 'rzp_test_your_key_here';
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL1 || 'http://localhost:8002';
+const RAZORPAY_KEY_ID = import.meta.env.VITE_RAZORPAY_KEY_ID || 'rzp_test_9wMmdAOOz3dAXZ';
 export default function VendingMachine({ machine, onBack }) {
   const [availablePads, setAvailablePads] = useState(machine.current_stock);
   const [selectedPads, setSelectedPads] = useState(1);
