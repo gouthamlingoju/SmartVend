@@ -16,7 +16,7 @@ load_dotenv()
 app = FastAPI()
 
 # Allow all origins or specify the frontend origin explicitly
-origins = [os.getenv("VITE_FRONTEND_URL"),"http://localhost:5174"]
+origins = [os.getenv("VITE_FRONTEND_URL"),"http://localhost:5173"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
