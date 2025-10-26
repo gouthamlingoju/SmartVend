@@ -1,5 +1,5 @@
 import { useState } from "react";
-import supabase from './supabase';
+import FeedbackForm from "./components/FeedbackForm";
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8002';
 const RAZORPAY_KEY_ID = import.meta.env.VITE_RAZORPAY_KEY_ID || 'rzp_test_9wMmdAOOz3dAXZ';
@@ -9,6 +9,7 @@ export default function VendingMachine({ machine, onBack }) {
   const [showPopup, setShowPopup] = useState(false);
   const [isDispensing, setIsDispensing] = useState(false);
   const [dispensedPads, setDispensedPads] = useState(0);
+  const [showFeedback, setShowFeedback] = useState(false);
 
   const handleIncrement = () => {
     if (selectedPads < 5 && selectedPads < availablePads) {
@@ -128,11 +129,6 @@ export default function VendingMachine({ machine, onBack }) {
             console.error("Payment verification error:", error);
           }
         },
-        prefill: {
-          name: "Customer Name",
-          email: "customer@example.com",
-          contact: "9876543210",
-        },
         theme: { color: "#F37254" },
       };
       const razorpay = new window.Razorpay(options);
@@ -161,7 +157,18 @@ export default function VendingMachine({ machine, onBack }) {
             <img src="/logo.png" alt="SmartVend Logo" className="h-10 w-10" />
             <h1 className="text-3xl font-bold">Smart<span className="text-green-400">Vend</span></h1>
           </div>
-          <p className="text-purple-100 mt-1">Hygiene Products Dispenser</p>
+          <div className="flex items-center justify-between mt-2">
+            <p className="text-purple-100">Hygiene Products Dispenser</p>
+            <button
+              onClick={() => setShowFeedback(true)}
+              className="flex items-center space-x-1 bg-white/10 hover:bg-white/20 text-white px-3 py-1 rounded-full text-sm transition-colors duration-200"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                <path fillRule="evenodd" d="M18 10c0 4.418-3.582 8-8 8s-8-3.582-8-8 3.582-8 8-8 8 3.582 8 8zm-8-3a1 1 0 00-1 1v2a1 1 0 102 0V8a1 1 0 00-1-1zm0 6a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
+              </svg>
+              <span>Feedback</span>
+            </button>
+          </div>
         </div>
         <div className="grid text-center gap-4 p-6 bg-gray-50">
           <div className="p-3 bg-white rounded-lg shadow-sm border border-gray-100">
@@ -246,12 +253,23 @@ export default function VendingMachine({ machine, onBack }) {
             <p className="text-gray-600 mb-6">Please collect your {selectedPads} pad{selectedPads > 1 ? 's' : ''} from the dispenser.</p>
             <button
               className="bg-purple-600 hover:bg-purple-700 text-white px-6 py-3 rounded-md transition-colors duration-200 w-full"
-              onClick={() => {setShowPopup(false); setSelectedPads(1); setDispensedPads(1);}}
+              onClick={() => {
+                setShowPopup(false);
+                setSelectedPads(1);
+                setDispensedPads(1);
+                setShowFeedback(true); // Re-enable automatic feedback prompt
+              }}
             >
               Done
             </button>
           </div>
         </div>
+      )}
+      {showFeedback && (
+        <FeedbackForm
+          machineId={machine.machine_id}
+          onClose={() => setShowFeedback(false)}
+        />
       )}
       {isDispensing && (
         <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-50">
