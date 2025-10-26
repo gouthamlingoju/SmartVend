@@ -16,7 +16,6 @@ function AppRoutes() {
 
   useEffect(() => {
     async function fetchMachines() {
-      // ✅ GOOD: Using Supabase for public data (machine listings)
       const { data, error } = await supabase
         .from('vending_machines')
         .select('*');
@@ -35,24 +34,6 @@ function AppRoutes() {
     }
     fetchMachines();
   }, []);
-
-  // ❌ BAD: Don't do this for sensitive operations
-  // const updateStock = async (machineId, newStock) => {
-  //   const { error } = await supabase
-  //     .from('vending_machines')
-  //     .update({ current_stock: newStock })
-  //     .eq('machine_id', machineId);
-  // };
-
-  // ✅ GOOD: Use backend API for sensitive operations
-  // const updateStock = async (machineId, newStock) => {
-  //   const response = await fetch(`${BACKEND_URL}/update-stock`, {
-  //     method: 'POST',
-  //     headers: { 'Content-Type': 'application/json' },
-  //     body: JSON.stringify({ machineId, newStock })
-  //   });
-  //   return response.json();
-  // };
 
   const navigate = useNavigate();
 

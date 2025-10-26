@@ -1,6 +1,7 @@
 import { useState } from "react";
+import supabase from './supabase';
 
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL1 || 'http://localhost:8002';
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8002';
 const RAZORPAY_KEY_ID = import.meta.env.VITE_RAZORPAY_KEY_ID || 'rzp_test_9wMmdAOOz3dAXZ';
 export default function VendingMachine({ machine, onBack }) {
   const [availablePads, setAvailablePads] = useState(machine.current_stock);
@@ -21,28 +22,51 @@ export default function VendingMachine({ machine, onBack }) {
     }
   };
 
-  function blinkLED(number) {
-    console.log(`Dispensing ${number} items via hardware...`);
-    fetch(`${BACKEND_URL}/dispense`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+  async function dispense(number) {
+  try {
+    // Trigger backend dispense
+    const res = await fetch(`${BACKEND_URL}/dispense`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ number }),
-    })
-      .then(res => res.json())
-      .then(data => {
-        console.log('Hardware response:', data);
-        if (data.status === 'success') {
-          console.log('✅ Hardware dispensing successful');
-        } else {
-          console.error('❌ Hardware dispensing failed:', data.error);
-        }
-      })
-      .catch(err => {
-        console.error('❌ Hardware communication error:', err);
-        // Fallback: simulate dispensing if hardware is not available
-        console.log('⚠️ Using fallback dispensing simulation');
-      });
+    });
+
+    const data = await res.json();
+
+    if (data.status === "success") {
+      // Get current stock
+
+
+      const { data: data, error: fetchError } = await supabase
+        .from("vending_machines")
+        .select("current_stock")
+        .eq("machine_id", machine.machine_id)
+        .single();
+
+
+      if (fetchError) throw fetchError;
+      console.log("Current stock fetched:", data.current_stock);
+      console.log("Dispensing number of pads:", number);
+      const newStock = data.current_stock - number;
+      console.log("New stock after dispensing:", newStock);
+      // Update stock
+      const { error: updateError } = await supabase
+        .from("vending_machines")
+        .update({ current_stock: newStock })
+        .eq("machine_id", machine.machine_id);
+
+      if (updateError) {
+        alert(`Dispense ok, but stock update failed: ${updateError.message}`);
+      } else {
+        alert("✅ Dispensing successful and stock updated!");
+      }
+    } else {
+      alert(`❌ Hardware dispensing failed: ${data.error}`);
+    }
+  } catch (err) {
+    alert(`❌ Error: ${err.message}`);
   }
+}
 
   const handlePayment = async () => {
     try {
@@ -82,7 +106,7 @@ export default function VendingMachine({ machine, onBack }) {
             if (1) {
               setAvailablePads(availablePads - selectedPads);
               setIsDispensing(true);
-              blinkLED(selectedPads);
+              dispense(selectedPads);
               for (let i = 0; i <= selectedPads; i++) {
                 setTimeout(() => {
                   setDispensedPads(i + 2);
@@ -96,7 +120,7 @@ export default function VendingMachine({ machine, onBack }) {
                 await fetch(`${BACKEND_URL}/low-stock-alert`, {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ message: "Pads are low in stock. Please restock.", machineID: machine.id, Remaining: (availablePads - selectedPads) }),
+                  body: JSON.stringify({ message: "Pads are low in stock. Please restock.", machineID: machine.machine_id, Remaining: (availablePads - selectedPads) }),
                 });
               }
             }
