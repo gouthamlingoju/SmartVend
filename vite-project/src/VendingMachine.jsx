@@ -191,7 +191,7 @@ export default function VendingMachine({ machine, onBack }) {
     if (data.status === "ok" || data.status === "success") {
       // fetch current stock from supabase and update
       const { data: stockData, error: fetchError } = await supabase
-        .from("vending_machines")
+        .from("machines")
         .select("current_stock")
         .eq("machine_id", machine.machine_id)
         .single();
@@ -200,7 +200,7 @@ export default function VendingMachine({ machine, onBack }) {
       const newStock = (stockData.current_stock ?? 0) - number;
 
       const { error: updateError } = await supabase
-        .from("vending_machines")
+        .from("machines")
         .update({ current_stock: newStock })
         .eq("machine_id", machine.machine_id);
 

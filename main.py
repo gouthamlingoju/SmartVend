@@ -13,11 +13,32 @@ import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from datetime import datetime
+import asyncio
+import db
 
 # Load environment variables
 load_dotenv()
 
 app = FastAPI(title="SmartVend Cloud Backend")
+
+
+@app.on_event("startup")
+async def startup_event():
+    # initialize DB pool if DATABASE_URL provided
+    try:
+        await db.init_pool()
+        if db.pool:
+            print("✅ DB pool initialized")
+    except Exception as e:
+        print("DB pool init error:", e)
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    try:
+        await db.close_pool()
+    except Exception:
+        pass
 
 # ============ CORS ============
 origins = [os.getenv("VITE_FRONTEND_URL"), "http://localhost:5173"]
@@ -40,50 +61,25 @@ if razorpay_key_id and razorpay_secret_key:
 else:
     print("⚠️ WARNING: Razorpay credentials missing! Payment endpoints will return errors.")
 
-# ============ In-Memory Machine Store ============
-# In production, use Supabase/Postgres. This in-memory store is for local testing
-# and will be migrated to Supabase later.
+# Use Supabase/Postgres as the single source of truth. In-memory stores removed.
 DISPLAY_CODE_TTL_MINUTES = int(os.getenv("DISPLAY_CODE_TTL_MINUTES", "10"))  # chosen: 10 minutes
 
-# machines holds machine-visible state (what ESP32 reads)
-machines = {
-    "M001": {
-        "api_key": "sv_m1_3h5k9d",
-        "status": "idle",
-        "display_code": "MV-1001",
-        "display_code_expires_at": None,
-        "quantity": 0,
-        "last_seen": None,
-    },
-    "M002": {
-        "api_key": "sv_m2_7x9k2b",
-        "status": "idle",
-        "display_code": "MV-2001",
-        "display_code_expires_at": None,
-        "quantity": 0,
-        "last_seen": None,
-    }
-}
-
-# locks holds active locks per machine. Structure:
-# { machine_id: { locked_by, access_code_hash, locked_at, expires_at, status, transaction_id } }
-locks = {}
-
-# transactions store payment/dispense metadata (in-memory for now)
-transactions = {}
-
 # ============ Auth Helper ============
-def verify_api_key(machine_id: str, authorization: Optional[str]):
-    if machine_id not in machines:
-        raise HTTPException(status_code=404, detail="Machine not registered")
+async def verify_api_key(machine_id: str, authorization: Optional[str]):
+    """Verify the provided machine API key against the DB. Raises HTTPException on failure."""
+    if not db.pool:
+        raise HTTPException(status_code=500, detail="Database not configured")
 
-    expected_key = machines[machine_id]["api_key"]
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing Authorization header")
 
     provided = authorization.split(" ")[1].strip()
-    # constant-time compare to avoid timing attacks
-    if not secrets.compare_digest(provided, expected_key):
+    m = await db.get_machine_by_id(machine_id)
+    if not m:
+        raise HTTPException(status_code=404, detail="Machine not registered")
+
+    expected_key = m.get('api_key')
+    if not expected_key or not secrets.compare_digest(provided, expected_key):
         raise HTTPException(status_code=401, detail="Invalid API key")
 
  # ============ ESP32 Communication APIs ============
@@ -94,50 +90,31 @@ async def register_machine(request: Request):
     machine_id = data.get("machine_id")
     if not machine_id:
         raise HTTPException(status_code=400, detail="Missing machine_id")
+    # DB-only mode: require database and upsert machine record
+    if not db.pool:
+        raise HTTPException(status_code=500, detail="Database not configured")
 
-    if machine_id not in machines:
-        machines[machine_id] = {
-            "api_key": data.get("api_key", "none"),
-            "status": "idle",
-            "display_code": generate_display_code(),
-            "display_code_expires_at": (datetime.utcnow() + timedelta(minutes=DISPLAY_CODE_TTL_MINUTES)).isoformat() + "Z",
-            "quantity": 0,
-            "last_seen": datetime.now().isoformat(),
-        }
-    else:
-        machines[machine_id]["last_seen"] = datetime.now().isoformat()
-
-    return {"message": f"Machine {machine_id} registered", "status": "ok"}
+    api_key = data.get("api_key", "none")
+    res = await db.upsert_machine(machine_id, api_key, DISPLAY_CODE_TTL_MINUTES)
+    if not res:
+        raise HTTPException(status_code=500, detail="Failed to upsert machine")
+    return {"message": f"Machine {machine_id} registered", "status": "ok", "display_code": res.get('display_code'), "display_code_expires_at": res.get('display_code_expires_at')}
 
 @app.get("/api/machine/{machine_id}/status")
 async def get_machine_status(machine_id: str, authorization: Optional[str] = Header(None)):
     """ESP32 polls this every few seconds"""
-    verify_api_key(machine_id, authorization)
+    # DB-backed: validate API key and return machine status
+    if not db.pool:
+        raise HTTPException(status_code=500, detail="Database not configured")
 
-    m = machines[machine_id]
-    m["last_seen"] = datetime.now().isoformat()
-
-    # determine lock info if any
-    lock = locks.get(machine_id)
-    locked = False
-    locked_by = None
-    expires_at = None
-    if lock and lock.get("status") == "locked":
-        locked = True
-        locked_by = lock.get("locked_by")
-        expires_at = lock.get("expires_at")
-
-    return {
-        "machine_id": machine_id,
-        "status": m["status"],
-        "display_code": m.get("display_code"),
-        "display_code_expires_at": m.get("display_code_expires_at"),
-        "locked": locked,
-        "locked_by": locked_by,
-        "expires_at": expires_at,
-        "quantity": m["quantity"],
-        "server_time": datetime.utcnow().isoformat() + "Z",
-    }
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+    provided = authorization.split(" ")[1].strip()
+    status = await db.get_machine_status_for_esp32(machine_id, provided)
+    if not status:
+        # either machine not found or API key mismatch
+        raise HTTPException(status_code=401, detail="Invalid credentials or machine not found")
+    return status
 
 
 @app.get("/api/machine/{machine_id}/public-status")
@@ -145,174 +122,69 @@ async def get_machine_public_status(machine_id: str, client_id: Optional[str] = 
     """Public status for frontend use. Does NOT require machine API key.
     If client_id provided, locked_by is revealed only when it matches.
     """
-    # print("machine ID",machine_id)
-    if machine_id not in machines:
+    if not db.pool:
+        raise HTTPException(status_code=500, detail="Database not configured")
+    s = await db.get_public_status(machine_id, client_id)
+    if not s:
         raise HTTPException(status_code=404, detail="Machine not found")
-
-    m = machines[machine_id]
-    lock = locks.get(machine_id)
-    locked = False
-    locked_by = None
-    expires_at = None
-    if lock and lock.get("status") == "locked":
-        locked = True
-        expires_at = lock.get("expires_at")
-        if client_id and lock.get("locked_by") == client_id:
-            locked_by = lock.get("locked_by")
-
-    return {
-        "machine_id": machine_id,
-        "status": m.get("status"),
-        "display_code": m.get("display_code"),
-        "display_code_expires_at": m.get("display_code_expires_at"),
-        "locked": locked,
-        "locked_by": locked_by,
-        "expires_at": expires_at,
-        "quantity": m.get("quantity"),
-        "server_time": datetime.utcnow().isoformat() + "Z",
-    }
+    return s
 
 
 @app.post("/api/machine/{machine_id}/unlock")
 async def unlock_by_client(machine_id: str, request: Request):
     """Allow the client who locked the machine to manually unlock it before TTL."""
-    if machine_id not in machines:
-        raise HTTPException(status_code=404, detail="Machine not found")
-
+    if not db.pool:
+        raise HTTPException(status_code=500, detail="Database not configured")
     data = await request.json()
     client_id = data.get("client_id")
     if not client_id:
         raise HTTPException(status_code=400, detail="client_id required")
 
-    lk = locks.get(machine_id)
-    if not lk or lk.get("status") != "locked":
-        raise HTTPException(status_code=409, detail="No active lock to unlock")
-
-    if lk.get("locked_by") != client_id:
-        raise HTTPException(status_code=403, detail="Lock not owned by this client")
-
-    # perform unlock: mark lock expired/cleared and rotate display code
-    lk["status"] = "expired"
-    machines[machine_id]["status"] = "idle"
-    machines[machine_id]["display_code"] = generate_display_code()
-    machines[machine_id]["display_code_expires_at"] = (datetime.utcnow() + timedelta(minutes=DISPLAY_CODE_TTL_MINUTES)).isoformat() + "Z"
-    try:
-        del locks[machine_id]
-    except KeyError:
-        pass
-
-    return {"status": "unlocked", "new_display_code": machines[machine_id]["display_code"], "expires_at": machines[machine_id]["display_code_expires_at"]}
+    res = await db.unlock_by_client_db(machine_id, client_id)
+    if res.get('error'):
+        if res['error'] == 'no_lock':
+            raise HTTPException(status_code=409, detail='No active lock to unlock')
+        if res['error'] == 'not_owner':
+            raise HTTPException(status_code=403, detail='Lock not owned by this client')
+    return {'status': 'unlocked', 'new_display_code': res.get('new_display_code')}
 
 @app.post("/api/machine/{machine_id}/confirm")
 async def confirm_dispense(machine_id: str, request: Request, authorization: Optional[str] = Header(None)):
     """ESP32 confirms dispensing success"""
-    verify_api_key(machine_id, authorization)
-
+    # verify API key
+    await verify_api_key(machine_id, authorization)
     data = await request.json()
     dispensed = int(data.get("dispensed", 0))
-    access_code = data.get("access_code")
     transaction_id = data.get("transaction_id")
 
-    # idempotency: if transaction_id provided and already completed, return success
-    if transaction_id and transaction_id in transactions:
-        tx = transactions[transaction_id]
-        if tx.get("completed_at"):
-            return {"status": "confirmed", "dispensed": tx.get("dispensed", dispensed)}
+    if not db.pool:
+        raise HTTPException(status_code=500, detail="Database not configured")
 
-    # mark machine idle, clear lock and set new display code
-    machines[machine_id]["status"] = "idle"
-    machines[machine_id]["display_code"] = generate_display_code()
-    machines[machine_id]["display_code_expires_at"] = (datetime.utcnow() + timedelta(minutes=DISPLAY_CODE_TTL_MINUTES)).isoformat() + "Z"
-    machines[machine_id]["last_seen"] = datetime.now().isoformat()
-
-    # update transactions if we have a transaction_id
-    if transaction_id:
-        tx = transactions.get(transaction_id, {})
-        tx["completed_at"] = datetime.utcnow().isoformat() + "Z"
-        tx["dispensed"] = dispensed
-        transactions[transaction_id] = tx
-
-    # clear lock
-    if machine_id in locks:
-        try:
-            del locks[machine_id]
-        except KeyError:
-            pass
-
-    print(f"✅ Machine {machine_id} confirmed dispense: {dispensed} items (transaction={transaction_id})")
-    return {"status": "confirmed", "dispensed": dispensed}
+    res = await db.confirm_dispense_db(machine_id, transaction_id, dispensed)
+    if res.get('error'):
+        return JSONResponse({'message': 'confirm_failed', 'error': res['error']}, status_code=400)
+    return {'status': 'confirmed', 'dispensed': dispensed, 'new_display_code': res.get('new_display_code')}
 
 @app.post("/api/machine/{machine_id}/report-error")
 async def report_error(machine_id: str, request: Request, authorization: Optional[str] = Header(None)):
     """ESP32 sends timeout or failure reports"""
-    verify_api_key(machine_id, authorization)
-
+    await verify_api_key(machine_id, authorization)
     data = await request.json()
     err = data.get("error")
     print(f"⚠️ Error from machine {machine_id}: {err}")
-
-    machines[machine_id]["status"] = "idle"
+    # Optionally, we could write this to an events table. For now just ack.
     return {"message": "Error logged"}
 
 
-def generate_display_code():
-    # MV-XXXXXXXX (8 uppercase alnum)
-    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-    code = "MV-" + "".join(secrets.choice(alphabet) for _ in range(8))
-    return code
-
-
-def hash_code(code: str) -> str:
-    return hashlib.sha256(code.encode("utf-8")).hexdigest()
-
-
-def expire_locks_if_needed():
-    # simple sweep to expire locks past their TTL
-    now = datetime.utcnow()
-    expired = []
-    for mid, lk in list(locks.items()):
-        exp = lk.get("expires_at")
-        if exp:
-            # parse isoformat
-            try:
-                exp_dt = datetime.fromisoformat(exp.replace("Z", ""))
-            except Exception:
-                continue
-            if exp_dt < now:
-                expired.append(mid)
-    for mid in expired:
-        locks[mid]["status"] = "expired"
-        machines[mid]["status"] = "idle"
-        # rotate display code
-        machines[mid]["display_code"] = generate_display_code()
-        machines[mid]["display_code_expires_at"] = (datetime.utcnow() + timedelta(minutes=DISPLAY_CODE_TTL_MINUTES)).isoformat() + "Z"
-
-
-# Initialize display codes for all machines at startup to ensure randomness
-for mid, m in machines.items():
-    if not m.get("display_code"):
-        m["display_code"] = generate_display_code()
-    if not m.get("display_code_expires_at"):
-        m["display_code_expires_at"] = (datetime.utcnow() + timedelta(minutes=DISPLAY_CODE_TTL_MINUTES)).isoformat() + "Z"
+# In DB-backed mode display codes and lock expiry are managed in the database.
 
 
 # ============ Frontend → ESP32 Dispense Trigger ============
 @app.post("/api/machine/{machine_id}/dispense")
 async def trigger_dispense(machine_id: str, request: Request):
     """Frontend (React) calls this after payment verification"""
-    if machine_id not in machines:
-        raise HTTPException(status_code=404, detail="Machine not found")
-
-    data = await request.json()
-    quantity = int(data.get("quantity", 1))
-    code = data.get("code", machines[machine_id].get("display_code"))
-
-    machines[machine_id]["status"] = "dispense"
-    machines[machine_id]["quantity"] = quantity
-    # keep display_code unchanged here; machines should retain display code until confirm
-    print(f"🚀 Dispense command sent to {machine_id}: {quantity} items (code={code})")
-
-    return {"message": f"Dispense command sent to {machine_id}", "status": "ok"}
+    # Deprecated/legacy endpoint. Use /api/machine/{machine_id}/trigger-dispense (server-verified) instead.
+    return JSONResponse({"error": "use /api/machine/{machine_id}/trigger-dispense (server-side)"}, status_code=400)
 
 
 @app.post("/api/lock-by-code")
@@ -320,56 +192,33 @@ async def lock_by_code(request: Request):
     """Frontend posts { client_id, code } to lock the machine atomically (in-memory simplified)
     This stores access_code_hash in locks and sets machine status to 'locked'.
     """
+    if not db.pool:
+        return JSONResponse({"error": "Database not configured. Locking requires Supabase/Postgres."}, status_code=500)
+
     data = await request.json()
     client_id = data.get("client_id")
     code = data.get("code")
-    print(client_id,code)
     if not client_id or not code:
         raise HTTPException(status_code=400, detail="client_id and code required")
 
-    # expire any stale locks first
-    expire_locks_if_needed()
+    res = await db.lock_by_code(client_id, code, DISPLAY_CODE_TTL_MINUTES)
+    if res is None:
+        raise HTTPException(status_code=500, detail="Lock failed")
+    if res.get('error'):
+        if res['error'] == 'code_not_found':
+            raise HTTPException(status_code=400, detail='Code not found or expired')
+        if res['error'] == 'busy':
+            # fetch lock info for machine
+            status = await db.get_public_status(res.get('machine_id'))
+            return JSONResponse({
+                "status": "busy",
+                "message": "Machine is already locked by another user",
+                "locked_by": status.get('locked_by'),
+                "locked_until": status.get('expires_at')
+            }, status_code=409)
+        raise HTTPException(status_code=400, detail=res.get('error'))
 
-    # find a machine with matching display_code and idle status
-    target_mid = None
-    for mid, m in machines.items():
-        if m.get("display_code") == code and m.get("status") == "idle":
-            target_mid = mid
-            break
-
-    if not target_mid:
-        # either code invalid or machine busy
-        # if a lock exists with this code but expired, it's been rotated by expire_locks_if_needed
-        raise HTTPException(status_code=400, detail="Code not found or expired")
-
-    # double-check there's no active lock
-    if target_mid in locks and locks[target_mid].get("status") == "locked":
-        lk = locks[target_mid]
-        return JSONResponse({
-            "status": "busy",
-            "message": "Machine is already locked by another user",
-            "locked_by": lk.get("locked_by"),
-            "locked_until": lk.get("expires_at")
-        }, status_code=409)
-
-    # create lock with hashed access code
-    now = datetime.utcnow()
-    expires_at = (now + timedelta(minutes=DISPLAY_CODE_TTL_MINUTES)).isoformat() + "Z"
-    locks[target_mid] = {
-        "locked_by": client_id,
-        "access_code_hash": hash_code(code),
-        "locked_at": now.isoformat() + "Z",
-        "expires_at": expires_at,
-        "status": "locked",
-    }
-    machines[target_mid]["status"] = "locked"
-
-    return {
-        "status": "locked",
-        "machine_id": target_mid,
-        "access_code": code,
-        "expires_at": expires_at,
-    }
+    return JSONResponse(res)
 
 
 @app.post("/api/machine/{machine_id}/trigger-dispense")
@@ -378,8 +227,8 @@ async def trigger_dispense_validated(machine_id: str, request: Request):
     Validates the lock, client and access_code hash before changing machine state.
     Body: { client_id, access_code, quantity, transaction_id, amount }
     """
-    if machine_id not in machines:
-        raise HTTPException(status_code=404, detail="Machine not found")
+    if not db.pool:
+        return JSONResponse({"error": "Database not configured. Trigger-dispense requires Supabase/Postgres."}, status_code=500)
 
     data = await request.json()
     client_id = data.get("client_id")
@@ -391,50 +240,18 @@ async def trigger_dispense_validated(machine_id: str, request: Request):
     if not client_id or not access_code or not transaction_id:
         raise HTTPException(status_code=400, detail="client_id, access_code and transaction_id required")
 
-    # expire any stale locks
-    expire_locks_if_needed()
+    res = await db.trigger_dispense_db(machine_id, client_id, access_code, quantity, transaction_id, amount)
+    if res.get('error'):
+        err = res['error']
+        if err == 'no_lock' or err == 'expired':
+            raise HTTPException(status_code=409, detail='No active lock or lock expired')
+        if err == 'not_owner':
+            raise HTTPException(status_code=403, detail='Lock not owned by this client')
+        if err == 'access_mismatch':
+            raise HTTPException(status_code=403, detail='Access code mismatch')
+        return JSONResponse({'error': err}, status_code=400)
 
-    lk = locks.get(machine_id)
-    if not lk or lk.get("status") != "locked":
-        raise HTTPException(status_code=409, detail="No active lock for this machine")
-
-    # check ownership
-    if lk.get("locked_by") != client_id:
-        raise HTTPException(status_code=403, detail="Lock not owned by this client")
-
-    # check expiry
-    try:
-        exp_dt = datetime.fromisoformat(lk.get("expires_at").replace("Z", ""))
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid lock expires_at")
-    if exp_dt < datetime.utcnow():
-        lk["status"] = "expired"
-        machines[machine_id]["status"] = "idle"
-        raise HTTPException(status_code=409, detail="Lock expired")
-
-    # verify access code via hash
-    if lk.get("access_code_hash") != hash_code(access_code):
-        raise HTTPException(status_code=403, detail="Access code mismatch")
-
-    # all good: update status to dispense and mark lock consumed
-    machines[machine_id]["status"] = "dispense"
-    machines[machine_id]["quantity"] = quantity
-    lk["status"] = "consumed"
-    lk["transaction_id"] = transaction_id
-
-    # create transaction record (in-memory)
-    transactions[transaction_id] = {
-        "id": transaction_id,
-        "machine_id": machine_id,
-        "client_id": client_id,
-        "access_code_hash": lk.get("access_code_hash"),
-        "amount": amount,
-        "quantity": quantity,
-        "payment_status": "paid",
-        "created_at": datetime.utcnow().isoformat() + "Z",
-    }
-
-    return {"status": "dispatch_sent"}
+    return JSONResponse({'status': 'dispatch_sent'})
 
 # ============ Payment and Alert Routes (from your existing code) ============
 @app.post('/create-order')

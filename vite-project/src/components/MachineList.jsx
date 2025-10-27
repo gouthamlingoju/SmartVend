@@ -46,7 +46,7 @@ export default function MachineList({ machines, onSelect }) {
           {filteredMachines.map(machine => {
             const machineKey = machine.machine_id || machine.id || machine.machineId || 'unknown';
             const displayId = machine.machine_id || machine.id || 'N/A';
-            const isActive = (machine.status === 'working') || (machine.status === 'active'); // accept both
+            const isActive = (machine.status === 'idle') || (machine.status === 'active'); // accept both
             return (
               <button
                 key={machineKey}
@@ -61,7 +61,7 @@ export default function MachineList({ machines, onSelect }) {
                 {isActive ? (
                   <div className="text-green-700 font-semibold">Available</div>
                 ) : (
-                  <div className="text-red-600 font-semibold">{reason}</div>
+                  <div className="text-red-600 font-semibold">{machine.status}</div>
                 )}
               </button>
             );

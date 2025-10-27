@@ -17,7 +17,7 @@ function AppRoutes() {
   useEffect(() => {
     async function fetchMachines() {
       const { data, error } = await supabase
-        .from('vending_machines')
+        .from('machines')
         .select('*');
       if (error) {
         console.error('Error fetching machines:', error);
