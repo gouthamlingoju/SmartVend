@@ -8,7 +8,7 @@ import uvicorn
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-import supabase as db
+import database as db
 from config import FRONTEND_URL,RAZORPAY_KEY_ID,RAZORPAY_SECRET_KEY,DISPLAY_CODE_TTL_MINUTES,SENDER_EMAIL,SENDER_PASSWORD,RECEIVER_EMAIL,SMTP_SERVER,SMTP_PORT
 # Load environment variables
 
