@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import FeedbackForm from "./components/FeedbackForm";
 import supabase from './supabase'; // added import
 
@@ -7,6 +7,14 @@ const RAZORPAY_KEY_ID = import.meta.env.VITE_RAZORPAY_KEY_ID || 'rzp_test_9wMmdA
 export default function VendingMachine({ machine, onBack }) {
   const [availablePads, setAvailablePads] = useState(machine.current_stock);
   const [selectedPads, setSelectedPads] = useState(1);
+  const [accessCodeInput, setAccessCodeInput] = useState("");
+  const [locked, setLocked] = useState(false);
+  const [lockedUntil, setLockedUntil] = useState(null);
+  const [lockedRemaining, setLockedRemaining] = useState(0);
+  const [clientId, setClientId] = useState(() => {
+    try { return localStorage.getItem('sv_client_id') || crypto.randomUUID(); } catch(e) { return 'client-' + Date.now(); }
+  });
+  const [transactionId, setTransactionId] = useState(null);
   const [showPopup, setShowPopup] = useState(false);
   const [isDispensing, setIsDispensing] = useState(false);
   const [dispensedPads, setDispensedPads] = useState(0);
@@ -17,6 +25,146 @@ export default function VendingMachine({ machine, onBack }) {
       setSelectedPads(selectedPads + 1);
     }
   };
+
+  // persist clientId
+  try { localStorage.setItem('sv_client_id', clientId); } catch(e) {}
+
+  // countdown helper
+  const getRemainingSeconds = (iso) => {
+    if (!iso) return 0;
+    const now = new Date();
+    const exp = new Date(iso);
+    return Math.max(0, Math.floor((exp - now) / 1000));
+  }
+
+  async function handleLockCode() {
+    if (!accessCodeInput) return alert('Enter code shown on the machine');
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/lock-by-code`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ client_id: clientId, code: accessCodeInput }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(()=>({detail:'Lock failed'}));
+        return alert(err.detail || err.message || 'Lock failed');
+      }
+      const data = await res.json();
+      setLocked(true);
+      setLockedUntil(data.expires_at);
+      // start polling machine status in background
+      startStatusPolling();
+      alert('Machine locked for you until ' + new Date(data.expires_at).toLocaleTimeString());
+    } catch (err) {
+      console.error('Lock error', err);
+      alert('Lock failed');
+    }
+  }
+
+  const statusPollRef = useRef(null);
+  const countdownRef = useRef(null);
+  function startStatusPolling() {
+    if (statusPollRef.current) return;
+    statusPollRef.current = setInterval(async () => {
+      try {
+        const res = await fetch(`${BACKEND_URL}/api/machine/${machine.machine_id}/public-status?client_id=${encodeURIComponent(clientId)}`);
+        if (!res.ok) return;
+        const s = await res.json();
+        // update locked state from server
+        if (s.locked && s.locked_by && s.locked_by === clientId) {
+          setLocked(true);
+          setLockedUntil(s.expires_at);
+          // compute remaining seconds using server_time to avoid client clock drift
+          if (s.server_time && s.expires_at) {
+            try {
+              const serverMs = Date.parse(s.server_time);
+              const expMs = Date.parse(s.expires_at);
+              const remaining = Math.max(0, Math.floor((expMs - serverMs) / 1000));
+              setLockedRemaining(remaining);
+              // start per-second countdown if not already
+              if (!countdownRef.current) {
+                countdownRef.current = setInterval(() => {
+                  setLockedRemaining(r => {
+                    if (r <= 1) {
+                      clearInterval(countdownRef.current);
+                      countdownRef.current = null;
+                      return 0;
+                    }
+                    return r - 1;
+                  });
+                }, 1000);
+              }
+            } catch (e) {
+              // ignore parse errors
+            }
+          }
+        } else if (!s.locked) {
+          setLocked(false);
+          setLockedUntil(null);
+          setLockedRemaining(0);
+          if (countdownRef.current) { clearInterval(countdownRef.current); countdownRef.current = null; }
+        }
+
+        // detect dispense completion: when server reports idle after dispensing
+        if (isDispensing && s.status === 'idle') {
+          setIsDispensing(false);
+          setShowPopup(true);
+          // stop polling
+          if (statusPollRef.current) {
+            clearInterval(statusPollRef.current);
+            statusPollRef.current = null;
+          }
+        }
+      } catch (e) {
+        // ignore errors, we'll retry
+      }
+    }, 2000);
+  }
+
+  useEffect(() => {
+    return () => {
+      if (statusPollRef.current) {
+        clearInterval(statusPollRef.current);
+        statusPollRef.current = null;
+      }
+      if (countdownRef.current) { clearInterval(countdownRef.current); countdownRef.current = null; }
+    }
+  }, []);
+
+  // on mount, check whether this client already holds a lock for this machine
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const res = await fetch(`${BACKEND_URL}/api/machine/${machine.machine_id}/public-status?client_id=${encodeURIComponent(clientId)}`);
+        if (!mounted || !res.ok) return;
+        const s = await res.json();
+        if (s.locked && s.locked_by && s.locked_by === clientId) {
+          setLocked(true);
+          setLockedUntil(s.expires_at);
+          // compute remaining seconds using server_time
+          if (s.server_time && s.expires_at) {
+            const serverMs = Date.parse(s.server_time);
+            const expMs = Date.parse(s.expires_at);
+            const remaining = Math.max(0, Math.floor((expMs - serverMs) / 1000));
+            setLockedRemaining(remaining);
+            // start countdown and polling
+            startStatusPolling();
+          }
+        }
+      } catch (e) {
+        // ignore
+      }
+    })();
+    return () => { mounted = false; }
+  }, []);
+
+  // helper to format seconds into mm:ss
+  const formatSeconds = (s) => {
+    const mm = Math.floor(s / 60).toString().padStart(2, '0');
+    const ss = (s % 60).toString().padStart(2, '0');
+    return `${mm}:${ss}`;
+  }
 
   const handleDecrement = () => {
     if (selectedPads > 1) {
@@ -30,7 +178,7 @@ export default function VendingMachine({ machine, onBack }) {
     const res = await fetch(`${BACKEND_URL}/api/machine/${machine.machine_id}/dispense`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ quantity: number, code: machine.code || machine.machine_id }),
+      body: JSON.stringify({ quantity: number, code: machine.display_code || machine.machine_id }),
     });
 
     if (!res.ok) {
@@ -70,18 +218,22 @@ export default function VendingMachine({ machine, onBack }) {
 }
 
   const handlePayment = async () => {
+    if (!locked) return alert('Please lock the machine by entering the code first');
+    const txId = (crypto && crypto.randomUUID) ? crypto.randomUUID() : 'tx-' + Date.now();
+    setTransactionId(txId);
     try {
       console.log('Making payment request to:', `${BACKEND_URL}/create-order`);
       const response = await fetch(`${BACKEND_URL}/create-order`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ amount: selectedPads * 500 }),
+        // amount in paise; include transaction metadata so backend can link if desired
+        body: JSON.stringify({ amount: selectedPads * 500, metadata: { transaction_id: txId, client_id: clientId, machine_id: machine.machine_id } }),
       });
-      
+
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
-      
+
       const data = await response.json();
       const { order_id, amount, currency } = data;
       const options = {
@@ -89,7 +241,7 @@ export default function VendingMachine({ machine, onBack }) {
         amount: amount,
         currency: currency,
         name: "SmartVend",
-        description: "Test Transaction",
+        description: "Purchase",
         order_id: order_id,
         handler: async function (response) {
           const paymentData = {
@@ -104,32 +256,29 @@ export default function VendingMachine({ machine, onBack }) {
               body: JSON.stringify(paymentData),
             });
             const verificationData = await verifyResponse.json();
-            if (1) {
-              setAvailablePads(availablePads - selectedPads);
-              setIsDispensing(true);
-              dispense(selectedPads);
-              try {
-                // animation: set dispensed count from 1..selectedPads
-                for (let i = 1; i <= selectedPads; i++) {
-                  setTimeout(() => setDispensedPads(i), 1000 * i);
-                }
-                setTimeout(() => {
-                  setIsDispensing(false);
-                  setShowPopup(true);
-                }, 1000 * selectedPads);
-                if (availablePads - selectedPads <= -1) {
-                  await fetch(`${BACKEND_URL}/low-stock-alert`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ message: "Pads are low in stock. Please restock.", machineID: machine.machine_id, Remaining: (availablePads - selectedPads) }),
-                  });
-                }
-              } catch (error) {
-                console.error("Dispensing animation error:", error);
-              }
+            // after successful verification, request backend to trigger dispense
+            const tdRes = await fetch(`${BACKEND_URL}/api/machine/${machine.machine_id}/trigger-dispense`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ client_id: clientId, access_code: accessCodeInput, quantity: selectedPads, transaction_id: txId, amount: selectedPads * 500 }),
+            });
+            if (!tdRes.ok) {
+              const err = await tdRes.json().catch(() => ({}));
+              throw new Error(err.detail || err.message || 'Trigger dispense failed');
             }
+
+            // success: update UI and start polling status for confirmation
+            setAvailablePads(availablePads - selectedPads);
+            setIsDispensing(true);
+            startStatusPolling();
+            // animate dispensed count locally
+            for (let i = 1; i <= selectedPads; i++) {
+              setTimeout(() => setDispensedPads(i), 1000 * i);
+            }
+
           } catch (error) {
-            console.error("Payment verification error:", error);
+            console.error("Payment verification or trigger error:", error);
+            alert(error.message || 'Payment/dispense failed');
           }
         },
         theme: { color: "#F37254" },
@@ -178,6 +327,29 @@ export default function VendingMachine({ machine, onBack }) {
             <p className="text-gray-500 text-sm">Machine ID</p>
             <p className="font-bold text-gray-800 font-mono">{machine.machine_id}</p> {/* use machine_id */}
             <p className="text-gray-500 text-sm mt-1">Location: <span className="font-semibold text-purple-700">{machine.location}</span></p>
+          </div>
+          <div className="p-3 bg-white rounded-lg shadow-sm border border-gray-100">
+            <p className="text-gray-500 text-sm">Enter Code shown on machine</p>
+            <div className="flex items-center justify-center mt-2 space-x-2">
+              <input value={accessCodeInput} onChange={(e)=>setAccessCodeInput(e.target.value)} className="px-3 py-2 border rounded-md w-48" placeholder="MV-XXXXXXX" />
+              <button onClick={handleLockCode} className="bg-purple-600 text-white px-3 py-2 rounded-md">Lock</button>
+            </div>
+            {locked && (
+              <p className="text-green-600 text-sm mt-2">Locked — time left: <span className="font-mono ml-1">{formatSeconds(lockedRemaining)}</span></p>
+            )}
+            {locked && (
+              <div className="mt-2">
+                <button onClick={async ()=>{
+                  try {
+                    const res = await fetch(`${BACKEND_URL}/api/machine/${machine.machine_id}/unlock`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ client_id: clientId }) });
+                    if (!res.ok) { const e = await res.json().catch(()=>({detail:'unlock failed'})); return alert(e.detail || e.message || 'Unlock failed'); }
+                    const d = await res.json();
+                    setLocked(false); setLockedUntil(null); setAccessCodeInput('');
+                    alert('Unlocked ');
+                  } catch(err) { console.error(err); alert('Unlock failed'); }
+                }} className="bg-red-500 text-white px-3 py-1 rounded-md">Unlock</button>
+              </div>
+            )}
           </div>
         </div>
         <div className="p-6 border-b border-gray-200">
