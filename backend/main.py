@@ -2,22 +2,15 @@ from fastapi import FastAPI, Request, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from typing import Optional
-import hashlib
 import secrets
-from datetime import timedelta
 import razorpay
-import os
 import uvicorn
-from dotenv import load_dotenv
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from datetime import datetime
-import asyncio
-import db
-
+import supabase as db
+from config import FRONTEND_URL,RAZORPAY_KEY_ID,RAZORPAY_SECRET_KEY,DISPLAY_CODE_TTL_MINUTES,SENDER_EMAIL,SENDER_PASSWORD,RECEIVER_EMAIL,SMTP_SERVER,SMTP_PORT
 # Load environment variables
-load_dotenv()
 
 app = FastAPI(title="SmartVend Cloud Backend")
 
@@ -41,7 +34,7 @@ async def shutdown_event():
         pass
 
 # ============ CORS ============
-origins = [os.getenv("VITE_FRONTEND_URL"), "http://localhost:5173"]
+origins = [FRONTEND_URL, "http://localhost:5173"]
 # filter out None / empty
 origins = [o for o in origins if o]
 app.add_middleware(
@@ -53,16 +46,13 @@ app.add_middleware(
 )
 
 # ============ Razorpay Setup ============
-razorpay_key_id = os.getenv("RAZORPAY_KEY_ID")
-razorpay_secret_key = os.getenv("RAZORPAY_SECRET_KEY")
 razorpay_client = None
-if razorpay_key_id and razorpay_secret_key:
-    razorpay_client = razorpay.Client(auth=(razorpay_key_id, razorpay_secret_key))
+if RAZORPAY_KEY_ID and RAZORPAY_SECRET_KEY:
+    razorpay_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_SECRET_KEY))
 else:
     print("⚠️ WARNING: Razorpay credentials missing! Payment endpoints will return errors.")
 
 # Use Supabase/Postgres as the single source of truth. In-memory stores removed.
-DISPLAY_CODE_TTL_MINUTES = int(os.getenv("DISPLAY_CODE_TTL_MINUTES", "10"))  # chosen: 10 minutes
 
 # ============ Auth Helper ============
 async def verify_api_key(machine_id: str, authorization: Optional[str]):
@@ -295,11 +285,11 @@ async def send_mail(request: Request):
     machineID = data.get("machineID")
     remaining = data.get("Remaining")
 
-    sender = os.getenv("SENDER_EMAIL")
-    password = os.getenv("SENDER_PASSWORD")
-    receiver = os.getenv("RECEIVER_EMAIL")
-    smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-    smtp_port = int(os.getenv("SMTP_PORT", 587))
+    sender = SENDER_EMAIL
+    password = SENDER_PASSWORD
+    receiver = RECEIVER_EMAIL
+    smtp_server = SMTP_SERVER
+    smtp_port = int(SMTP_PORT)
 
     subject = f"Low Stock Alert - {machineID}"
     body = f"Machine {machineID} is running low.\nRemaining pads: {remaining}"
