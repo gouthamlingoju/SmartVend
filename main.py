@@ -18,21 +18,24 @@ app = FastAPI(title="SmartVend Cloud Backend")
 
 # ============ CORS ============
 origins = [os.getenv("VITE_FRONTEND_URL"), "http://localhost:5173"]
+# filter out None / empty
+origins = [o for o in origins if o]
 app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+  CORSMiddleware,
+  allow_origins=origins,
+  allow_credentials=True,
+  allow_methods=["*"],
+  allow_headers=["*"],
 )
 
 # ============ Razorpay Setup ============
 razorpay_key_id = os.getenv("RAZORPAY_KEY_ID")
 razorpay_secret_key = os.getenv("RAZORPAY_SECRET_KEY")
+razorpay_client = None
 if razorpay_key_id and razorpay_secret_key:
     razorpay_client = razorpay.Client(auth=(razorpay_key_id, razorpay_secret_key))
 else:
-    print("⚠️ WARNING: Razorpay credentials missing!")
+    print("⚠️ WARNING: Razorpay credentials missing! Payment endpoints will return errors.")
 
 # ============ In-Memory Machine Store ============
 # In production, use Firebase/Supabase or PostgreSQL.
@@ -152,6 +155,8 @@ async def trigger_dispense(machine_id: str, request: Request):
 # ============ Payment and Alert Routes (from your existing code) ============
 @app.post('/create-order')
 async def create_order(request: Request):
+    if not razorpay_client:
+        return JSONResponse({"error": "Razorpay not configured"}, status_code=500)
     try:
         data = await request.json()
         amount = data.get("amount")
@@ -169,6 +174,8 @@ async def create_order(request: Request):
 
 @app.post('/verify-payment')
 async def verify_payment(request: Request):
+    if not razorpay_client:
+        return JSONResponse({"message": "Razorpay not configured"}, status_code=500)
     try:
         data = await request.json()
         params = {

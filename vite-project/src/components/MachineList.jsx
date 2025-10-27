@@ -44,11 +44,12 @@ export default function MachineList({ machines, onSelect }) {
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-8">
           {filteredMachines.map(machine => {
-            const reason = statusReasons[machine.status] || (machine.status === 'out_of_stock' ? 'Out of stock' : 'Not available');
-            const isActive = machine.status === 'working';
+            const machineKey = machine.machine_id || machine.id || machine.machineId || 'unknown';
+            const displayId = machine.machine_id || machine.id || 'N/A';
+            const isActive = (machine.status === 'working') || (machine.status === 'active'); // accept both
             return (
               <button
-                key={machine.machine_id}
+                key={machineKey}
                 className={`bg-white rounded-xl shadow-lg p-6 flex flex-col items-center border-2 transition relative min-h-48 ${isActive ? 'border-purple-100 hover:border-purple-400' : 'border-gray-200 opacity-60 cursor-not-allowed'}`}
                 onClick={() => isActive ? onSelect(machine) : null}
                 disabled={!isActive}
@@ -56,7 +57,7 @@ export default function MachineList({ machines, onSelect }) {
               >
                 <img src="/logo.png" alt="Machine" className="h-14 w-14 mb-3" />
                 <div className="font-bold text-lg text-purple-800 mb-1">{machine.location}</div>
-                <div className="text-gray-500 text-sm mb-2">ID: {machine.machine_id}</div>
+                <div className="text-gray-500 text-sm mb-2">ID: {displayId}</div>
                 {isActive ? (
                   <div className="text-green-700 font-semibold">Available</div>
                 ) : (

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import FeedbackForm from "./components/FeedbackForm";
+import supabase from './supabase'; // added import
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL ;
 const RAZORPAY_KEY_ID = import.meta.env.VITE_RAZORPAY_KEY_ID || 'rzp_test_9wMmdAOOz3dAXZ';
@@ -25,32 +26,31 @@ export default function VendingMachine({ machine, onBack }) {
 
   async function dispense(number) {
   try {
-    // Trigger backend dispense
-    const res = await fetch(`${BACKEND_URL}/dispense`, {
+    // Trigger backend dispense (use machine.machine_id and API path that matches backend)
+    const res = await fetch(`${BACKEND_URL}/api/machine/${machine.machine_id}/dispense`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ number }),
+      body: JSON.stringify({ quantity: number, code: machine.code || machine.machine_id }),
     });
+
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
 
     const data = await res.json();
 
-    if (data.status === "success") {
-      // Get current stock
-
-
-      const { data: data, error: fetchError } = await supabase
+    // backend returns { status: "ok", ... }
+    if (data.status === "ok" || data.status === "success") {
+      // fetch current stock from supabase and update
+      const { data: stockData, error: fetchError } = await supabase
         .from("vending_machines")
         .select("current_stock")
         .eq("machine_id", machine.machine_id)
         .single();
 
-
       if (fetchError) throw fetchError;
-      console.log("Current stock fetched:", data.current_stock);
-      console.log("Dispensing number of pads:", number);
-      const newStock = data.current_stock - number;
-      console.log("New stock after dispensing:", newStock);
-      // Update stock
+      const newStock = (stockData.current_stock ?? 0) - number;
+
       const { error: updateError } = await supabase
         .from("vending_machines")
         .update({ current_stock: newStock })
@@ -62,10 +62,10 @@ export default function VendingMachine({ machine, onBack }) {
         alert("✅ Dispensing successful and stock updated!");
       }
     } else {
-      alert(`❌ Hardware dispensing failed: ${data.error}`);
+      alert(`❌ Hardware dispensing failed: ${data.error || JSON.stringify(data)}`);
     }
   } catch (err) {
-    alert(`❌ Error: ${err.message}`);
+    alert(`❌ Error: ${err?.message ?? err}`);
   }
 }
 
@@ -108,21 +108,24 @@ export default function VendingMachine({ machine, onBack }) {
               setAvailablePads(availablePads - selectedPads);
               setIsDispensing(true);
               dispense(selectedPads);
-              for (let i = 0; i <= selectedPads; i++) {
+              try {
+                // animation: set dispensed count from 1..selectedPads
+                for (let i = 1; i <= selectedPads; i++) {
+                  setTimeout(() => setDispensedPads(i), 1000 * i);
+                }
                 setTimeout(() => {
-                  setDispensedPads(i + 2);
-                }, 1000 * (i + 1));
-              }
-              setTimeout(() => {
-                setIsDispensing(false);
-                setShowPopup(true);
-              }, 1000 * selectedPads);
-              if (availablePads - selectedPads <= -1) {
-                await fetch(`${BACKEND_URL}/low-stock-alert`, {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ message: "Pads are low in stock. Please restock.", machineID: machine.machine_id, Remaining: (availablePads - selectedPads) }),
-                });
+                  setIsDispensing(false);
+                  setShowPopup(true);
+                }, 1000 * selectedPads);
+                if (availablePads - selectedPads <= -1) {
+                  await fetch(`${BACKEND_URL}/low-stock-alert`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message: "Pads are low in stock. Please restock.", machineID: machine.machine_id, Remaining: (availablePads - selectedPads) }),
+                  });
+                }
+              } catch (error) {
+                console.error("Dispensing animation error:", error);
               }
             }
           } catch (error) {
@@ -173,7 +176,7 @@ export default function VendingMachine({ machine, onBack }) {
         <div className="grid text-center gap-4 p-6 bg-gray-50">
           <div className="p-3 bg-white rounded-lg shadow-sm border border-gray-100">
             <p className="text-gray-500 text-sm">Machine ID</p>
-            <p className="font-bold text-gray-800 font-mono">{machine.id}</p>
+            <p className="font-bold text-gray-800 font-mono">{machine.machine_id}</p> {/* use machine_id */}
             <p className="text-gray-500 text-sm mt-1">Location: <span className="font-semibold text-purple-700">{machine.location}</span></p>
           </div>
         </div>
