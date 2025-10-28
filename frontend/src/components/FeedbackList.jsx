@@ -15,7 +15,7 @@ export default function FeedbackList() {
 
   const fetchMachines = async () => {
     const { data, error } = await supabase
-      .from('vending_machines')
+      .from('machines')
       .select('machine_id, location');
     if (!error) {
       setMachines(data);
@@ -27,7 +27,7 @@ export default function FeedbackList() {
       .from('feedback')
       .select(`
         *,
-        vending_machines (
+        machines (
           location
         )
       `)
@@ -152,7 +152,7 @@ export default function FeedbackList() {
                   <div className="flex">{renderStars(feedback.rating)}</div>
                   <span className="text-sm text-gray-500">|</span>
                   <span className="text-sm text-gray-600">
-                    {feedback.vending_machines?.location || 'Unknown Location'} ({feedback.machine_id})
+                    {feedback.machines?.location || 'Unknown Location'} ({feedback.machine_id})
                   </span>
                 </div>
                 <span className="text-sm text-gray-500">{formatDate(feedback.timestamp)}</span>

@@ -61,17 +61,14 @@ def _hash_code(code: str) -> str:
 	return hashlib.sha256(code.encode('utf-8')).hexdigest()
 
 
-async def get_machine_by_id(machine_id: str) -> Optional[dict]:
-	"""Return machine row or None."""
-	if not supabase:
-		return None
+async def get_machine_by_id(machine_id: str):
+    def _query():
+        res = supabase.table("machines").select("*").eq("machine_id", machine_id).execute()
+        if not res.data:  # no machine found
+            return None
+        return res.data[0]  # return first matching record
+    return await asyncio.to_thread(_query)
 
-	def _query():
-		return supabase.table('machines').select('*').eq('id', machine_id).single().execute()
-
-	res = await asyncio.to_thread(_query)
-	data = _res_data(res)
-	return data
 
 
 async def upsert_machine(machine_id: str, api_key: str, ttl_minutes: Optional[int]):
@@ -86,7 +83,7 @@ async def upsert_machine(machine_id: str, api_key: str, ttl_minutes: Optional[in
 	expires_at = (_now() + timedelta(minutes=ttl)).isoformat()
 
 	payload = {
-		'id': machine_id,
+		'machine_id': machine_id,
 		'api_key': api_key,
 		'display_code': display_code,
 		'display_code_expires_at': expires_at,
@@ -110,7 +107,8 @@ async def get_machine_status_for_esp32(machine_id: str, provided_key: str):
 	"""Return status info for machine if API key matches, otherwise None."""
 	m = await get_machine_by_id(machine_id)
 	if not m:
-		return None
+		return {"status": "no_machine_found"}
+
 	expected = m.get('api_key')
 	if not expected or not secrets.compare_digest(str(expected), str(provided_key)):
 		return None
@@ -118,13 +116,19 @@ async def get_machine_status_for_esp32(machine_id: str, provided_key: str):
 	# Build status object
 	# include basic machine fields and current lock if any
 	def _lock_query():
-		return supabase.table('locks').select('*').eq('machine_id', machine_id).single().execute()
+		res = supabase.table('locks').select('*').eq('machine_id', machine_id).execute()
+		if not res.data:  # no rows returned
+			return None
+		return res.data[0]  # return the first record
 
-	res = await asyncio.to_thread(_lock_query) if supabase else None
-	lock = _res_data(res) if res else None
+
+	lock = await asyncio.to_thread(_lock_query)
+	# Continue and return machine status even without a lock
+	# This ensures ESP32 always gets display_code
+
 
 	status = {
-		'id': m.get('id'),
+		'machine_id': m.get('machine_id'),
 		'status': m.get('status'),
 		'current_stock': m.get('current_stock'),
 		'display_code': m.get('display_code'),
@@ -140,13 +144,20 @@ async def get_public_status(machine_id: str, client_id: Optional[str] = None):
 	"""Return public view of machine status. Only reveal locked_by when it matches client_id."""
 	m = await get_machine_by_id(machine_id)
 	if not m:
-		return None
+		return {"status": "no_machine_found"}
+
 
 	def _lock_query():
-		return supabase.table('locks').select('*').eq('machine_id', machine_id).single().execute()
+		res = supabase.table('locks').select('*').eq('machine_id', machine_id).execute()
+		if not res.data:  # no rows returned
+			return None
+		return res.data[0]  # return the first record
 
-	res = await asyncio.to_thread(_lock_query) if supabase else None
-	lock = _res_data(res) if res else None
+
+	lock = await asyncio.to_thread(_lock_query)
+	if not lock:
+		# handle missing lock record gracefully
+		return {"status": "no_lock_found"}
 
 	locked_by = None
 	if lock and lock.get('status') == 'locked':
@@ -156,7 +167,7 @@ async def get_public_status(machine_id: str, client_id: Optional[str] = None):
 			locked_by = None
 
 	out = {
-		'id': m.get('id'),
+		'machine_id': m.get('machie_id'),
 		'status': m.get('status'),
 		'current_stock': m.get('current_stock'),
 		'display_code_expires_at': m.get('display_code_expires_at'),
@@ -170,7 +181,12 @@ async def unlock_by_client_db(machine_id: str, client_id: str):
 	"""Unlock machine if owned by client_id. Returns dict with possible error or new_display_code."""
 	# fetch lock
 	def _get_lock():
-		return supabase.table('locks').select('*').eq('machine_id', machine_id).single().execute()
+		query = supabase.table('locks').select('*').eq('machine_id', machine_id).execute()
+		data = query.data
+		if not data:
+			return None  # or handle appropriately
+		return data[0]  # first record if multiple found
+
 
 	res = await asyncio.to_thread(_get_lock)
 	lock = _res_data(res)
@@ -265,11 +281,16 @@ async def lock_by_code(client_id: str, code: str, ttl_minutes: int):
 	if not exp or _now().isoformat() > exp:
 		return {'error': 'code_not_found'}
 
-	machine_id = machine.get('id')
+	machine_id = machine.get('machine_id')
 
 	# check existing lock
 	def _get_lock():
-		return supabase.table('locks').select('*').eq('machine_id', machine_id).single().execute()
+		query = supabase.table('locks').select('*').eq('machine_id', machine_id).execute()
+		data = query.data
+		if not data:
+			return None  # or handle appropriately
+		return data[0]  # first record if multiple found
+
 
 	res_lock = await asyncio.to_thread(_get_lock)
 	lock = _res_data(res_lock)
@@ -289,7 +310,7 @@ async def lock_by_code(client_id: str, code: str, ttl_minutes: int):
 		'expires_at': expires_at,
 		'status': 'locked'
 	}
-
+	print(payload)
 	def _upsert_lock():
 		return supabase.table('locks').upsert(payload).execute()
 
