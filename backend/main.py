@@ -1,18 +1,28 @@
-from fastapi import FastAPI, Request, HTTPException, Header
+from fastapi import FastAPI, Request, HTTPException, Header, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from typing import Optional
 import secrets
 import razorpay
+import json
+import asyncio
+import redis.asyncio as aioredis
 import uvicorn
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 import database as db
-from config import FRONTEND_URL,RAZORPAY_KEY_ID,RAZORPAY_SECRET_KEY,DISPLAY_CODE_TTL_MINUTES,SENDER_EMAIL,SENDER_PASSWORD,RECEIVER_EMAIL,SMTP_SERVER,SMTP_PORT
+from config import FRONTEND_URL,RAZORPAY_KEY_ID,RAZORPAY_SECRET_KEY,DISPLAY_CODE_TTL_MINUTES,SENDER_EMAIL,SENDER_PASSWORD,RECEIVER_EMAIL,SMTP_SERVER,SMTP_PORT,REDIS_URL
 # Load environment variables
 
 app = FastAPI(title="SmartVend Cloud Backend")
+
+# In-memory map of connected machines: machine_id -> WebSocket
+# When an ESP32 connects it should send a first message: { "type": "register", "machine_id": "<id>" }
+connected_machines: dict = {}
+redis_client = None
+redis_listener_task = None
+REDIS_CHANNEL = "ws:commands"
 
 
 @app.on_event("startup")
@@ -24,6 +34,143 @@ async def startup_event():
             print("✅ DB pool initialized")
     except Exception as e:
         print("DB pool init error:", e)
+    # Start Redis pubsub listener for cross-worker WebSocket messages
+    global redis_client, redis_listener_task
+    try:
+        if REDIS_URL:
+            redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
+            # start background task to listen for published ws commands
+            redis_listener_task = asyncio.create_task(_redis_pubsub_listener(redis_client))
+            print("✅ Redis pubsub listener started")
+    except Exception as e:
+        print("Redis init error:", e)
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """WebSocket endpoint for ESP32 devices.
+    Protocol (JSON messages):
+      - {"type":"register", "machine_id":"...", "api_key":"..."}
+      - {"type":"status", "value":"active|locked|unlocked"}
+      - {"type":"fetch_display"}
+      - server responses: {"type":"display_code","value":"1234"} or {"type":"command","action":"dispense","duration":1}
+    """
+    await websocket.accept()
+    machine_id = None
+    try:
+        while True:
+            data = await websocket.receive_text()
+            try:
+                msg = json.loads(data)
+            except Exception:
+                print("Invalid WS JSON:", data)
+                continue
+
+            mtype = msg.get("type")
+
+            # Registration message binds this WebSocket to a machine_id
+            if mtype == "register":
+                machine_id = msg.get("machine_id")
+                api_key = msg.get("api_key")
+                if machine_id:
+                    connected_machines[machine_id] = websocket
+                    print(f"WebSocket: registered machine {machine_id}")
+                    # Optionally upsert machine record in DB (keeps server in sync)
+                    try:
+                        if db.pool:
+                            await db.upsert_machine(machine_id, api_key or "none", DISPLAY_CODE_TTL_MINUTES)
+                    except Exception as e:
+                        print("DB upsert during WS register failed:", e)
+
+            elif mtype == "status":
+                # status updates from device; simply log for now and optionally update DB
+                value = msg.get("value")
+                print(f"WS status from {machine_id}: {value}")
+                # update DB heartbeat / last_seen
+                try:
+                    if machine_id and db.pool:
+                        await db.set_machine_last_seen(machine_id)
+                except Exception:
+                    pass
+
+            elif mtype == "fetch_display":
+                # Device asks for its current display code; check DB and refresh if expired
+                if not machine_id:
+                    await websocket.send_text(json.dumps({"type": "error", "error": "not_registered"}))
+                    continue
+                try:
+                    if db.pool:
+                        info = await db.get_or_refresh_display_code(machine_id)
+                        if info and info.get("display_code"):
+                            payload = {"type": "display_code", "value": info.get("display_code")}
+                            await websocket.send_text(json.dumps(payload))
+                            print(f"Sent display_code to {machine_id}")
+                        else:
+                            await websocket.send_text(json.dumps({"type": "display_code", "value": "----"}))
+                    else:
+                        await websocket.send_text(json.dumps({"type": "display_code", "value": "----"}))
+                except Exception as e:
+                    print("Error responding to fetch_display:", e)
+
+            else:
+                # Unknown message type — log and continue
+                print("WS unknown message:", msg)
+
+    except WebSocketDisconnect:
+        print("WebSocket disconnected", machine_id)
+        if machine_id and connected_machines.get(machine_id) is websocket:
+            connected_machines.pop(machine_id, None)
+    except Exception as e:
+        print("WebSocket error:", e)
+        if machine_id and connected_machines.get(machine_id) is websocket:
+            connected_machines.pop(machine_id, None)
+
+
+async def _redis_pubsub_listener(rclient):
+    """Background task that listens for published WS commands and forwards to local sockets."""
+    pubsub = None
+    try:
+        pubsub = rclient.pubsub()
+        await pubsub.subscribe(REDIS_CHANNEL)
+        print(f"Subscribed to redis channel {REDIS_CHANNEL}")
+        while True:
+            try:
+                msg = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                if not msg:
+                    await asyncio.sleep(0.01)
+                    continue
+                data = msg.get('data')
+                if not data:
+                    continue
+                if isinstance(data, (bytes, bytearray)):
+                    data = data.decode()
+                try:
+                    obj = json.loads(data)
+                except Exception:
+                    print("Invalid redis WS payload:", data)
+                    continue
+                machine = obj.get('machine_id')
+                payload = obj.get('payload')
+                if machine and payload:
+                    ws = connected_machines.get(machine)
+                    if ws:
+                        try:
+                            await ws.send_text(json.dumps(payload))
+                            print(f"Forwarded redis payload to {machine}")
+                        except Exception as e:
+                            print("Error forwarding to ws client:", e)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                # loop continues on transient errors
+                print("Redis pubsub listener error:", e)
+                await asyncio.sleep(1)
+    finally:
+        try:
+            if pubsub:
+                await pubsub.unsubscribe(REDIS_CHANNEL)
+        except Exception:
+            pass
 
 
 @app.on_event("shutdown")
@@ -241,6 +388,27 @@ async def trigger_dispense_validated(machine_id: str, request: Request):
             raise HTTPException(status_code=403, detail='Access code mismatch')
         return JSONResponse({'error': err}, status_code=400)
 
+    # If the machine is connected over WebSocket, send a dispense command (best-effort)
+    try:
+        payload = {"type": "command", "action": "dispense", "duration": quantity}
+        # Attempt local delivery
+        ws = connected_machines.get(machine_id)
+        if ws:
+            try:
+                await ws.send_text(json.dumps(payload))
+                print(f"Sent dispense command to {machine_id} (quantity={quantity}) via WebSocket")
+            except Exception as e:
+                print(f"Local WS send failed for {machine_id}:", e)
+
+        # Publish to Redis so other workers can forward to their connected sockets (best-effort)
+        try:
+            if redis_client:
+                await redis_client.publish(REDIS_CHANNEL, json.dumps({"machine_id": machine_id, "payload": payload}))
+        except Exception as e:
+            print("Redis publish failed:", e)
+    except Exception as e:
+        print(f"Failed to send WS command to {machine_id}:", e)
+
     return JSONResponse({'status': 'dispatch_sent'})
 
 # ============ Payment and Alert Routes (from your existing code) ============
@@ -313,4 +481,10 @@ async def send_mail(request: Request):
 
 # ============ Run Server ============
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8002)
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8002,
+        reload=True  # 🔥 Enables auto-reload
+    )
+

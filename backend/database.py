@@ -165,9 +165,9 @@ async def get_public_status(machine_id: str, client_id: Optional[str] = None):
 			locked_by = lock.get('locked_by')
 		else:
 			locked_by = None
-
+	print(m)
 	out = {
-		'machine_id': m.get('machie_id'),
+		'machine_id': m.get('machine_id'),
 		'status': m.get('status'),
 		'current_stock': m.get('current_stock'),
 		'display_code_expires_at': m.get('display_code_expires_at'),
@@ -366,4 +366,56 @@ async def trigger_dispense_db(machine_id: str, client_id: str, access_code: str,
 	await asyncio.to_thread(_update_machine)
 
 	return {'status': 'ok'}
+
+
+async def set_machine_last_seen(machine_id: str):
+	"""Update the machine's last_seen_at timestamp (best-effort)."""
+	if not supabase:
+		return None
+
+	def _update():
+		return supabase.table('machines').update({'last_seen_at': _now().isoformat()}).eq('machine_id', machine_id).execute()
+
+	try:
+		res = await asyncio.to_thread(_update)
+		return _res_data(res)
+	except Exception:
+		return None
+
+
+async def get_or_refresh_display_code(machine_id: str, ttl_minutes: Optional[int] = None):
+	"""Return the current display code for the machine. If expired (or missing), generate a new one,
+	update the DB and return it. Returns dict: { 'display_code': str, 'display_code_expires_at': iso } or None if machine missing.
+	"""
+	if not supabase:
+		return None
+
+	def _get():
+		return supabase.table('machines').select('*').eq('machine_id', machine_id).execute()
+
+	res = await asyncio.to_thread(_get)
+	data = _res_data(res)
+	if not data:
+		return None
+	m = data[0] if isinstance(data, list) else data
+
+	exp = m.get('display_code_expires_at')
+	now_iso = _now().isoformat()
+	ttl = int(ttl_minutes) if ttl_minutes else int(DISPLAY_CODE_TTL_MINUTES) if DISPLAY_CODE_TTL_MINUTES else 10
+
+	if not exp or now_iso > exp:
+		# expired -> generate new
+		display_code = f"{secrets.randbelow(900000)+100000}"
+		expires_at = (_now() + timedelta(minutes=ttl)).isoformat()
+
+		def _update_machine():
+			return supabase.table('machines').update({
+				'display_code': display_code,
+				'display_code_expires_at': expires_at
+			}).eq('machine_id', machine_id).execute()
+
+		await asyncio.to_thread(_update_machine)
+		return {'display_code': display_code, 'display_code_expires_at': expires_at}
+	else:
+		return {'display_code': m.get('display_code'), 'display_code_expires_at': exp}
 
