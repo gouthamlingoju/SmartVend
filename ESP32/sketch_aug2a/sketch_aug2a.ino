@@ -1,5 +1,6 @@
 #include <WiFi.h>
 #include <WebSocketsClient.h>
+#include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <LiquidCrystal_I2C.h>
 
@@ -7,6 +8,7 @@
 const char* ssid = "YOUR_WIFI_SSID";
 const char* password = "YOUR_WIFI_PASSWORD";
 const char* serverHost = "my-fastapi-app.onrender.com";  // your Render WebSocket host
+const char* serverHttps = "https://my-fastapi-app.onrender.com";  // HTTP API endpoint
 const int serverPort = 443;
 const char* serverPath = "/ws";
 // Unique identifier for this machine (set to your machine's ID)
@@ -31,6 +33,8 @@ DeviceState state = UNLOCKED;
 bool motorRunning = false;
 unsigned long motorStartTime = 0;
 unsigned long motorRunDuration = 0;  // dynamically set by server
+int currentStock = 50;  // Track current stock level
+String currentTransactionId = "";  // Track current transaction for confirmation
 
 // timing constants
 const unsigned long POST_INTERVAL = 1000;    // 1 second
@@ -85,6 +89,86 @@ void sendJSON(const char* type, const char* value) {
   String message;
   serializeJson(doc, message);
   webSocket.sendTXT(message);
+}
+
+// HTTP helpers for API calls
+void sendConfirmDispense(int dispensed) {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  HTTPClient http;
+  String url = String(serverHttps) + "/api/machine/" + machine_id + "/confirm";
+  http.begin(url);
+  
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("Authorization", String("Bearer ") + machine_api_key);
+
+  StaticJsonDocument<200> doc;
+  doc["dispensed"] = dispensed;
+  doc["transaction_id"] = currentTransactionId;
+  
+  String requestBody;
+  serializeJson(doc, requestBody);
+  
+  int httpCode = http.POST(requestBody);
+  if (httpCode > 0) {
+    String payload = http.getString();
+    Serial.printf("Confirm response: %d - %s\n", httpCode, payload.c_str());
+    
+    if (httpCode == 200) {
+      StaticJsonDocument<200> response;
+      deserializeJson(response, payload);
+      const char* newCode = response["new_display_code"];
+      if (newCode) {
+        currentDisplayCode = String(newCode);
+        if (state == UNLOCKED) {
+          updateLCD("Unlocked", ("Code: " + currentDisplayCode).c_str());
+        }
+      }
+    }
+  }
+  http.end();
+}
+
+void reportError(const char* error) {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  HTTPClient http;
+  String url = String(serverHttps) + "/api/machine/" + machine_id + "/report-error";
+  http.begin(url);
+  
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("Authorization", String("Bearer ") + machine_api_key);
+
+  StaticJsonDocument<200> doc;
+  doc["error"] = error;
+  if (currentTransactionId.length() > 0) {
+    doc["transaction_id"] = currentTransactionId;
+  }
+  
+  String requestBody;
+  serializeJson(doc, requestBody);
+  
+  http.POST(requestBody);
+  http.end();
+}
+
+void checkLowStock() {
+  if (currentStock <= 10) {  // Alert threshold
+    HTTPClient http;
+    String url = String(serverHttps) + "/low-stock-alert";
+    http.begin(url);
+    http.addHeader("Content-Type", "application/json");
+
+    StaticJsonDocument<200> doc;
+    doc["machineID"] = machine_id;
+    doc["Remaining"] = currentStock;
+    
+    String requestBody;
+    serializeJson(doc, requestBody);
+    
+    http.POST(requestBody);
+    http.end();
+  }
 }
 
 void sendRegister() {
@@ -151,6 +235,17 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
         else if (strcmp(msgType, "command") == 0) {
           const char* action = doc["action"];
           if (strcmp(action, "dispense") == 0 && state == LOCKED) {
+            // Store transaction ID for confirmation
+            if (doc.containsKey("transaction_id")) {
+              currentTransactionId = doc["transaction_id"].as<String>();
+            }
+
+            // Check stock
+            int requestedQuantity = doc.containsKey("quantity") ? doc["quantity"].as<int>() : 1;
+            if (currentStock < requestedQuantity) {
+              reportError("insufficient_stock");
+              return;
+            }
 
             unsigned long duration = 0;
 
@@ -168,6 +263,10 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
             }
 
             motorRunForward(duration);
+            
+            // Update stock after successful dispense start
+            currentStock -= requestedQuantity;
+            checkLowStock();
           }
         }
 
@@ -222,7 +321,14 @@ void loop() {
   // Unlocked behavior
   if (state == UNLOCKED) {
     if (now - lastPost > POST_INTERVAL) {
-      sendJSON("status", "active");
+      // Send richer status including stock level
+      StaticJsonDocument<200> doc;
+      doc["type"] = "status";
+      doc["value"] = "active";
+      doc["stock"] = currentStock;
+      String message;
+      serializeJson(doc, message);
+      webSocket.sendTXT(message);
       lastPost = now;
     }
 
@@ -247,5 +353,11 @@ void loop() {
     motorStop();
     motorRunning = false;
     updateLCD("Locked", "Waiting...");
+    
+    // Confirm successful dispense with backend
+    if (currentTransactionId.length() > 0) {
+      sendConfirmDispense(1);  // Confirm 1 successful dispense
+      currentTransactionId = "";  // Clear transaction
+    }
   }
 }

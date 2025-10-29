@@ -174,11 +174,17 @@ export default function VendingMachine({ machine, onBack }) {
 
   async function dispense(number) {
   try {
-    // Trigger backend dispense (use machine.machine_id and API path that matches backend)
-    const res = await fetch(`${BACKEND_URL}/api/machine/${machine.machine_id}/dispense`, {
+    // Use trigger-dispense endpoint with required validation fields
+    const res = await fetch(`${BACKEND_URL}/api/machine/${machine.machine_id}/trigger-dispense`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ quantity: number, code: machine.display_code || machine.machine_id }),
+      body: JSON.stringify({ 
+        client_id: clientId,
+        access_code: accessCodeInput,
+        quantity: number,
+        transaction_id: crypto.randomUUID(),
+        amount: number * 500
+      }),
     });
 
     if (!res.ok) {
