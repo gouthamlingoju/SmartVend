@@ -25,3 +25,5 @@ RECEIVER_EMAIL = os.getenv('RECEIVER_EMAIL')
 DISPLAY_CODE_TTL_MINUTES= os.getenv('DISPLAY_CODE_TTL_MINUTES')
 
 FRONTEND_URL = os.getenv('FRONTEND_URL')
+# Optional Redis URL for cross-worker WebSocket coordination (e.g. redis://localhost:6379)
+REDIS_URL = os.getenv('REDIS_URL')
