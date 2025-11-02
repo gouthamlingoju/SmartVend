@@ -155,24 +155,20 @@ async def get_public_status(machine_id: str, client_id: Optional[str] = None):
 
 
 	lock = await asyncio.to_thread(_lock_query)
-	if not lock:
-		# handle missing lock record gracefully
-		return {"status": "no_lock_found"}
-
+	is_locked = bool(lock and lock.get('status') == 'locked' and lock.get('expires_at') and _now().isoformat() < lock.get('expires_at'))
 	locked_by = None
-	if lock and lock.get('status') == 'locked':
+	if is_locked:
 		if client_id and client_id == lock.get('locked_by'):
 			locked_by = lock.get('locked_by')
-		else:
-			locked_by = None
-	print(m)
 	out = {
 		'machine_id': m.get('machine_id'),
 		'status': m.get('status'),
 		'current_stock': m.get('current_stock'),
 		'display_code_expires_at': m.get('display_code_expires_at'),
+		'locked': is_locked,
 		'locked_by': locked_by,
 		'expires_at': lock.get('expires_at') if lock else None,
+		'server_time': _now().isoformat(),
 	}
 	return out
 
@@ -189,7 +185,7 @@ async def unlock_by_client_db(machine_id: str, client_id: str):
 
 
 	res = await asyncio.to_thread(_get_lock)
-	lock = _res_data(res)
+	lock = res
 	if not lock or lock.get('status') != 'locked':
 		return {'error': 'no_lock'}
 	if lock.get('locked_by') != client_id:
@@ -209,8 +205,9 @@ async def unlock_by_client_db(machine_id: str, client_id: str):
 	def _update_machine():
 		return supabase.table('machines').update({
 			'display_code': display_code,
-			'display_code_expires_at': expires_at
-		}).eq('id', machine_id).execute()
+			'display_code_expires_at': expires_at,
+			'status': 'idle'
+		}).eq('machine_id', machine_id).execute()
 
 	await asyncio.to_thread(_update_machine)
 	return {'new_display_code': display_code}
@@ -239,6 +236,30 @@ async def confirm_dispense_db(machine_id: str, transaction_id: str, dispensed: i
 
 	await asyncio.to_thread(_update_tx)
 
+	# decrement machine stock by dispensed quantity (non-negative)
+	try:
+		def _get_machine():
+			return supabase.table('machines').select('current_stock').eq('machine_id', machine_id).single().execute()
+
+		mres = await asyncio.to_thread(_get_machine)
+
+		mdata = _res_data(mres)
+		if mdata is not None and isinstance(mdata, dict):
+			current = int(mdata.get('current_stock') or 0)
+			new_stock = max(0, current - int(dispensed or 0))
+			print("Newstockkk   ",new_stock)
+			def _update_stock():
+				# Update status to 'Unavailable' if stock reaches 0
+				update_data = {'current_stock': new_stock}
+				if new_stock <= 0:
+					update_data['status'] = 'Unavailable'
+				return supabase.table('machines').update(update_data).eq('machine_id', machine_id).execute()
+
+			await asyncio.to_thread(_update_stock)
+	except Exception as e:
+		# best-effort; log and continue
+		print(f"Stock decrement error for {machine_id}: {e}")
+
 	# clear lock for machine
 	def _delete_lock():
 		return supabase.table('locks').delete().eq('machine_id', machine_id).execute()
@@ -255,7 +276,7 @@ async def confirm_dispense_db(machine_id: str, transaction_id: str, dispensed: i
 			'display_code': display_code,
 			'display_code_expires_at': expires_at,
 			'status': 'idle'
-		}).eq('id', machine_id).execute()
+		}).eq('machine_id', machine_id).execute()
 
 	await asyncio.to_thread(_update_machine)
 	return {'new_display_code': display_code}
@@ -293,7 +314,7 @@ async def lock_by_code(client_id: str, code: str, ttl_minutes: int):
 
 
 	res_lock = await asyncio.to_thread(_get_lock)
-	lock = _res_data(res_lock)
+	lock = res_lock
 	if lock and lock.get('status') == 'locked' and lock.get('expires_at') and _now().isoformat() < lock.get('expires_at'):
 		return {'error': 'busy', 'machine_id': machine_id}
 
@@ -315,7 +336,49 @@ async def lock_by_code(client_id: str, code: str, ttl_minutes: int):
 		return supabase.table('locks').upsert(payload).execute()
 
 	await asyncio.to_thread(_upsert_lock)
+	# mark machine as locked
+	def _update_machine_locked():
+		return supabase.table('machines').update({'status': 'locked'}).eq('machine_id', machine_id).execute()
+	await asyncio.to_thread(_update_machine_locked)
 	return {'machine_id': machine_id, 'status': 'locked', 'expires_at': expires_at}
+
+
+async def expire_lock_and_rotate_code(machine_id: str):
+    """Expire any active lock for machine_id if past expires_at; rotate display code; set status idle.
+    Returns dict with fields or None if no action.
+    """
+    if not supabase:
+        return None
+
+    def _get_lock():
+        return supabase.table('locks').select('*').eq('machine_id', machine_id).single().execute()
+
+    res = await asyncio.to_thread(_get_lock)
+    lock = _res_data(res)
+    if not lock or lock.get('status') != 'locked':
+        return None
+    if not lock.get('expires_at') or _now().isoformat() < lock.get('expires_at'):
+        return None
+
+    # delete lock
+    def _delete_lock():
+        return supabase.table('locks').delete().eq('machine_id', machine_id).execute()
+    await asyncio.to_thread(_delete_lock)
+
+    # rotate code
+    ttl = int(DISPLAY_CODE_TTL_MINUTES) if DISPLAY_CODE_TTL_MINUTES else 10
+    display_code = f"{secrets.randbelow(900000)+100000}"
+    expires_at = (_now() + timedelta(minutes=ttl)).isoformat()
+
+    def _update_machine():
+        return supabase.table('machines').update({
+            'display_code': display_code,
+            'display_code_expires_at': expires_at,
+            'status': 'idle'
+        }).eq('machine_id', machine_id).execute()
+
+    await asyncio.to_thread(_update_machine)
+    return {'new_display_code': display_code, 'display_code_expires_at': expires_at}
 
 
 async def trigger_dispense_db(machine_id: str, client_id: str, access_code: str, quantity: int, transaction_id: str, amount: int):
@@ -361,7 +424,7 @@ async def trigger_dispense_db(machine_id: str, client_id: str, access_code: str,
 
 	# update machine status
 	def _update_machine():
-		return supabase.table('machines').update({'status': 'dispatch_sent'}).eq('id', machine_id).execute()
+		return supabase.table('machines').update({'status': 'dispatch_sent'}).eq('machine_id', machine_id).execute()
 
 	await asyncio.to_thread(_update_machine)
 
@@ -369,20 +432,57 @@ async def trigger_dispense_db(machine_id: str, client_id: str, access_code: str,
 
 
 async def set_machine_last_seen(machine_id: str):
-	"""Update the machine's last_seen_at timestamp (best-effort)."""
-	if not supabase:
-		return None
+    """Update the machine's last_seen_at timestamp (best-effort)."""
+    if not supabase:
+        return None
 
-	def _update():
-		return supabase.table('machines').update({'last_seen_at': _now().isoformat()}).eq('machine_id', machine_id).execute()
+    def _update():
+        return supabase.table('machines').update({'last_seen_at': _now().isoformat()}).eq('machine_id', machine_id).execute()
 
-	try:
-		res = await asyncio.to_thread(_update)
-		return _res_data(res)
-	except Exception:
-		return None
+    try:
+        res = await asyncio.to_thread(_update)
+        return _res_data(res)
+    except Exception:
+        return None
 
+async def update_machine_stock(machine_id: str, new_stock: int):
+    """Update machine's stock level and last refill timestamp.
+    Updates status to 'Unavailable' if stock is 0, otherwise sets status to 'idle' if it was 'Unavailable'."""
+    if not supabase:
+        return None
 
+    # Check current status if stock is being refilled (new_stock > 0)
+    current_status = None
+    if new_stock > 0:
+        def _get_current_status():
+            res = supabase.table('machines').select('status').eq('machine_id', machine_id).single().execute()
+            return _res_data(res)
+        try:
+            current_machine = await asyncio.to_thread(_get_current_status)
+            current_status = current_machine.get('status') if current_machine else None
+        except Exception:
+            pass
+
+    def _update():
+        update_data = {
+            'current_stock': new_stock,
+            'last_refill_at': _now().isoformat()
+        }
+        # Update status based on stock level
+        if new_stock <= 0:
+            update_data['status'] = 'Unavailable'
+        elif current_status == 'Unavailable':
+            # If stock is being refilled and machine was unavailable, set it back to idle
+            update_data['status'] = 'idle'
+        
+        return supabase.table('machines').update(update_data).eq('machine_id', machine_id).execute()
+
+    try:
+        res = await asyncio.to_thread(_update)
+        return _res_data(res)
+    except Exception as e:
+        print(f"Stock update error: {e}")
+        return None
 async def get_or_refresh_display_code(machine_id: str, ttl_minutes: Optional[int] = None):
 	"""Return the current display code for the machine. If expired (or missing), generate a new one,
 	update the DB and return it. Returns dict: { 'display_code': str, 'display_code_expires_at': iso } or None if machine missing.

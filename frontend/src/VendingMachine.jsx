@@ -11,6 +11,7 @@ export default function VendingMachine({ machine, onBack }) {
   const [locked, setLocked] = useState(false);
   const [lockedUntil, setLockedUntil] = useState(null);
   const [lockedRemaining, setLockedRemaining] = useState(0);
+  const [lockedByOther, setLockedByOther] = useState(false);
   const [clientId, setClientId] = useState(() => {
     try { return localStorage.getItem('sv_client_id') || crypto.randomUUID(); } catch(e) { return 'client-' + Date.now(); }
   });
@@ -19,6 +20,7 @@ export default function VendingMachine({ machine, onBack }) {
   const [isDispensing, setIsDispensing] = useState(false);
   const [dispensedPads, setDispensedPads] = useState(0);
   const [showFeedback, setShowFeedback] = useState(false);
+  const lockGraceRef = useRef(0);
 
   const handleIncrement = () => {
     if (selectedPads < 5 && selectedPads < availablePads) {
@@ -52,6 +54,8 @@ export default function VendingMachine({ machine, onBack }) {
       const data = await res.json();
       setLocked(true);
       setLockedUntil(data.expires_at);
+      // avoid immediate unlock due to eventual consistency in status polling
+      lockGraceRef.current = Date.now() + 5000;
       // start polling machine status in background
       startStatusPolling();
       alert('Machine locked for you until ' + new Date(data.expires_at).toLocaleTimeString());
@@ -74,6 +78,8 @@ export default function VendingMachine({ machine, onBack }) {
         if (s.locked && s.locked_by && s.locked_by === clientId) {
           setLocked(true);
           setLockedUntil(s.expires_at);
+          // once server confirms our lock, end grace period
+          lockGraceRef.current = 0;
           // compute remaining seconds using server_time to avoid client clock drift
           if (s.server_time && s.expires_at) {
             try {
@@ -98,8 +104,28 @@ export default function VendingMachine({ machine, onBack }) {
               // ignore parse errors
             }
           }
-        } else if (!s.locked) {
+          setLockedByOther(false);
+        } else if (s.locked) {
+          // locked by someone else
           setLocked(false);
+          setLockedByOther(true);
+          setLockedUntil(s.expires_at || null);
+          if (s.server_time && s.expires_at) {
+            try {
+              const serverMs = Date.parse(s.server_time);
+              const expMs = Date.parse(s.expires_at);
+              const remaining = Math.max(0, Math.floor((expMs - serverMs) / 1000));
+              setLockedRemaining(remaining);
+            } catch(e) {}
+          }
+          if (countdownRef.current) { clearInterval(countdownRef.current); countdownRef.current = null; }
+        } else if (!s.locked) {
+          // if within grace window after locking, ignore temporary unlocked status
+          if (Date.now() < lockGraceRef.current) {
+            return;
+          }
+          setLocked(false);
+          setLockedByOther(false);
           setLockedUntil(null);
           setLockedRemaining(0);
           if (countdownRef.current) { clearInterval(countdownRef.current); countdownRef.current = null; }
@@ -131,6 +157,19 @@ export default function VendingMachine({ machine, onBack }) {
     }
   }, []);
 
+  // Auto-dismiss success popup after a short delay and reset view
+  useEffect(() => {
+    if (!showPopup) return;
+    const t = setTimeout(() => {
+      setShowPopup(false);
+      setSelectedPads(1);
+      setDispensedPads(0);
+      // After success popup timeout, open feedback form automatically
+      setShowFeedback(true);
+    }, 4000);
+    return () => clearTimeout(t);
+  }, [showPopup]);
+
   // on mount, check whether this client already holds a lock for this machine
   useEffect(() => {
     let mounted = true;
@@ -150,6 +189,17 @@ export default function VendingMachine({ machine, onBack }) {
             setLockedRemaining(remaining);
             // start countdown and polling
             startStatusPolling();
+          }
+        } else if (s.locked) {
+          // locked by someone else on mount
+          setLocked(false);
+          setLockedByOther(true);
+          setLockedUntil(s.expires_at || null);
+          if (s.server_time && s.expires_at) {
+            const serverMs = Date.parse(s.server_time);
+            const expMs = Date.parse(s.expires_at);
+            const remaining = Math.max(0, Math.floor((expMs - serverMs) / 1000));
+            setLockedRemaining(remaining);
           }
         }
       } catch (e) {
@@ -183,7 +233,7 @@ export default function VendingMachine({ machine, onBack }) {
         access_code: accessCodeInput,
         quantity: number,
         transaction_id: crypto.randomUUID(),
-        amount: number * 500
+        amount: number * 100
       }),
     });
 
@@ -205,9 +255,15 @@ export default function VendingMachine({ machine, onBack }) {
       if (fetchError) throw fetchError;
       const newStock = (stockData.current_stock ?? 0) - number;
 
+      const updateData = { current_stock: newStock };
+      // Update status to 'Unavailable' if stock reaches 0
+      if (newStock <= 0) {
+        updateData.status = 'Unavailable';
+      }
+
       const { error: updateError } = await supabase
         .from("machines")
-        .update({ current_stock: newStock })
+        .update(updateData)
         .eq("machine_id", machine.machine_id);
 
       if (updateError) {
@@ -228,12 +284,12 @@ export default function VendingMachine({ machine, onBack }) {
     const txId = (crypto && crypto.randomUUID) ? crypto.randomUUID() : 'tx-' + Date.now();
     setTransactionId(txId);
     try {
-      console.log('Making payment request to:', `${BACKEND_URL}/create-order`);
+      // console.log('Making payment request to:', `${BACKEND_URL}/create-order`);
       const response = await fetch(`${BACKEND_URL}/create-order`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         // amount in paise; include transaction metadata so backend can link if desired
-        body: JSON.stringify({ amount: selectedPads * 500, metadata: { transaction_id: txId, client_id: clientId, machine_id: machine.machine_id } }),
+        body: JSON.stringify({ amount: selectedPads * 100, metadata: { transaction_id: txId, client_id: clientId, machine_id: machine.machine_id } }),
       });
 
       if (!response.ok) {
@@ -266,7 +322,7 @@ export default function VendingMachine({ machine, onBack }) {
             const tdRes = await fetch(`${BACKEND_URL}/api/machine/${machine.machine_id}/trigger-dispense`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ client_id: clientId, access_code: accessCodeInput, quantity: selectedPads, transaction_id: txId, amount: selectedPads * 500 }),
+              body: JSON.stringify({ client_id: clientId, access_code: accessCodeInput, quantity: selectedPads, transaction_id: txId, amount: selectedPads * 100 }),
             });
             if (!tdRes.ok) {
               const err = await tdRes.json().catch(() => ({}));
@@ -279,7 +335,12 @@ export default function VendingMachine({ machine, onBack }) {
             startStatusPolling();
             // animate dispensed count locally
             for (let i = 1; i <= selectedPads; i++) {
-              setTimeout(() => setDispensedPads(i), 1000 * i);
+              setTimeout(() => setDispensedPads(i), 2000 * i);
+              if (selectedPads === i){
+                setIsDispensing(false);
+                setShowPopup(true);
+                console.log("Dispensing completed");
+              }
             }
 
           } catch (error) {
@@ -335,26 +396,33 @@ export default function VendingMachine({ machine, onBack }) {
             <p className="text-gray-500 text-sm mt-1">Location: <span className="font-semibold text-purple-700">{machine.location}</span></p>
           </div>
           <div className="p-3 bg-white rounded-lg shadow-sm border border-gray-100">
-            <p className="text-gray-500 text-sm">Enter Code shown on machine</p>
-            <div className="flex items-center justify-center mt-2 space-x-2">
-              <input value={accessCodeInput} onChange={(e)=>setAccessCodeInput(e.target.value)} className="px-3 py-2 border rounded-md w-48" placeholder="MV-XXXXXXX" />
-              <button onClick={handleLockCode} className="bg-purple-600 text-white px-3 py-2 rounded-md">Lock</button>
-            </div>
             {locked && (
-              <p className="text-green-600 text-sm mt-2">Locked — time left: <span className="font-mono ml-1">{formatSeconds(lockedRemaining)}</span></p>
+              <>
+                <p className="text-green-600 text-sm">Locked — time left: <span className="font-mono ml-1">{formatSeconds(lockedRemaining)}</span></p>
+                <div className="mt-2">
+                  <button onClick={async ()=>{
+                    try {
+                      const res = await fetch(`${BACKEND_URL}/api/machine/${machine.machine_id}/unlock`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ client_id: clientId }) });
+                      if (!res.ok) { const e = await res.json().catch(()=>({detail:'unlock failed'})); return alert(e.detail || e.message || 'Unlock failed'); }
+                      const d = await res.json();
+                      setLocked(false); setLockedUntil(null); setAccessCodeInput(''); setLockedByOther(false);
+                      alert('Unlocked ');
+                    } catch(err) { console.error(err); alert('Unlock failed'); }
+                  }} className="bg-red-500 text-white px-3 py-1 rounded-md">Unlock</button>
+                </div>
+              </>
             )}
-            {locked && (
-              <div className="mt-2">
-                <button onClick={async ()=>{
-                  try {
-                    const res = await fetch(`${BACKEND_URL}/api/machine/${machine.machine_id}/unlock`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ client_id: clientId }) });
-                    if (!res.ok) { const e = await res.json().catch(()=>({detail:'unlock failed'})); return alert(e.detail || e.message || 'Unlock failed'); }
-                    const d = await res.json();
-                    setLocked(false); setLockedUntil(null); setAccessCodeInput('');
-                    alert('Unlocked ');
-                  } catch(err) { console.error(err); alert('Unlock failed'); }
-                }} className="bg-red-500 text-white px-3 py-1 rounded-md">Unlock</button>
-              </div>
+            {!locked && lockedByOther && (
+              <p className="text-amber-600 text-sm">This machine is locked by another user — time left: <span className="font-mono ml-1">{formatSeconds(lockedRemaining)}</span></p>
+            )}
+            {!locked && !lockedByOther && (
+              <>
+                <p className="text-gray-500 text-sm">Enter Code shown on machine</p>
+                <div className="flex items-center justify-center mt-2 space-x-2">
+                  <input value={accessCodeInput} onChange={(e)=>setAccessCodeInput(e.target.value)} className="px-3 py-2 border rounded-md w-48" placeholder="MV-XXXXXXX" />
+                  <button onClick={handleLockCode} className="bg-purple-600 text-white px-3 py-2 rounded-md">Lock</button>
+                </div>
+              </>
             )}
           </div>
         </div>
@@ -406,13 +474,13 @@ export default function VendingMachine({ machine, onBack }) {
         <div className="p-6">
           <div className="flex justify-between items-center mb-6">
             <p className="text-lg text-gray-600">Total Price:</p>
-            <p className="text-2xl font-bold text-purple-700">₹{selectedPads * 5}</p>
+            <p className="text-2xl font-bold text-purple-700">₹{selectedPads * 1}</p>
           </div>
           <div className="flex flex-col space-y-4">
             <button
               className="w-full bg-purple-600 hover:bg-purple-700 text-white py-3 px-4 rounded-lg font-medium shadow-md transition-colors duration-200 flex items-center justify-center space-x-2"
               onClick={handlePayment}
-              disabled={availablePads < selectedPads}
+              disabled={!locked || availablePads < selectedPads}
             >
               <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
                 <path fillRule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clipRule="evenodd" />
@@ -437,7 +505,7 @@ export default function VendingMachine({ machine, onBack }) {
               onClick={() => {
                 setShowPopup(false);
                 setSelectedPads(1);
-                setDispensedPads(1);
+                setDispensedPads(0);
                 setShowFeedback(true); // Re-enable automatic feedback prompt
               }}
             >
