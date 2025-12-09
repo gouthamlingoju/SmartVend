@@ -1,4 +1,12 @@
-from fastapi import FastAPI, Request, HTTPException, Header, WebSocket, WebSocketDisconnect, Depends
+from fastapi import (
+    FastAPI,
+    Request,
+    HTTPException,
+    Header,
+    WebSocket,
+    WebSocketDisconnect,
+    Depends,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer
@@ -14,7 +22,19 @@ import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 import database as db
-from config import FRONTEND_URL,RAZORPAY_KEY_ID,RAZORPAY_SECRET_KEY,DISPLAY_CODE_TTL_MINUTES,SENDER_EMAIL,SENDER_PASSWORD,RECEIVER_EMAIL,SMTP_SERVER,SMTP_PORT,REDIS_URL,ADMIN_PASSWORD
+from config import (
+    FRONTEND_URL,
+    RAZORPAY_KEY_ID,
+    RAZORPAY_SECRET_KEY,
+    DISPLAY_CODE_TTL_MINUTES,
+    SENDER_EMAIL,
+    SENDER_PASSWORD,
+    RECEIVER_EMAIL,
+    SMTP_SERVER,
+    SMTP_PORT,
+    REDIS_URL,
+    ADMIN_PASSWORD,
+)
 
 # Load environment variables
 
@@ -49,7 +69,9 @@ async def startup_event():
         if REDIS_URL:
             redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
             # start background task to listen for published ws commands
-            redis_listener_task = asyncio.create_task(_redis_pubsub_listener(redis_client))
+            redis_listener_task = asyncio.create_task(
+                _redis_pubsub_listener(redis_client)
+            )
             print("✅ Redis pubsub listener started")
     except Exception as e:
         print("Redis init error:", e)
@@ -73,7 +95,7 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     machine_id = None
     heartbeat_task = None
-    
+
     async def heartbeat():
         """Send periodic pings to keep connection alive"""
         try:
@@ -82,6 +104,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 await websocket.send_text(json.dumps({"type": "ping"}))
         except Exception:
             pass  # Task will be cancelled on disconnect
+
     try:
         while True:
             data = await websocket.receive_text()
@@ -111,7 +134,9 @@ async def websocket_endpoint(websocket: WebSocket):
                     # Optionally upsert machine record in DB (keeps server in sync)
                     try:
                         if db.pool:
-                            await db.upsert_machine(machine_id, api_key or "none", DISPLAY_CODE_TTL_MINUTES)
+                            await db.upsert_machine(
+                                machine_id, api_key or "none", DISPLAY_CODE_TTL_MINUTES
+                            )
                     except Exception as e:
                         print("DB upsert during WS register failed:", e)
 
@@ -123,25 +148,36 @@ async def websocket_endpoint(websocket: WebSocket):
                 try:
                     if machine_id and db.pool:
                         await db.set_machine_last_seen(machine_id)
-                except Exception:
-                    pass
+                        if value == "active":
+                            await db.update_machine_status(machine_id, "active")
+                except Exception as e:
+                    print(f"Error updating machine status for {machine_id}: {e}")
 
             elif mtype == "fetch_display":
                 # Device asks for its current display code; check DB and refresh if expired
                 if not machine_id:
-                    await websocket.send_text(json.dumps({"type": "error", "error": "not_registered"}))
+                    await websocket.send_text(
+                        json.dumps({"type": "error", "error": "not_registered"})
+                    )
                     continue
                 try:
                     if db.pool:
                         info = await db.get_or_refresh_display_code(machine_id)
                         if info and info.get("display_code"):
-                            payload = {"type": "display_code", "value": info.get("display_code")}
+                            payload = {
+                                "type": "display_code",
+                                "value": info.get("display_code"),
+                            }
                             await websocket.send_text(json.dumps(payload))
                             print(f"Sent display_code to {machine_id}")
                         else:
-                            await websocket.send_text(json.dumps({"type": "display_code", "value": "----"}))
+                            await websocket.send_text(
+                                json.dumps({"type": "display_code", "value": "----"})
+                            )
                     else:
-                        await websocket.send_text(json.dumps({"type": "display_code", "value": "----"}))
+                        await websocket.send_text(
+                            json.dumps({"type": "display_code", "value": "----"})
+                        )
                 except Exception as e:
                     print("Error responding to fetch_display:", e)
 
@@ -153,6 +189,11 @@ async def websocket_endpoint(websocket: WebSocket):
         print("WebSocket disconnected", machine_id)
         if machine_id and connected_machines.get(machine_id) is websocket:
             connected_machines.pop(machine_id, None)
+            try:
+                if db.pool:
+                    await db.update_machine_status(machine_id, "offline")
+            except Exception as e:
+                print(f"Error updating machine status to offline for {machine_id}: {e}")
     except Exception as e:
         print("WebSocket error:", e)
         if machine_id and connected_machines.get(machine_id) is websocket:
@@ -168,11 +209,13 @@ async def _redis_pubsub_listener(rclient):
         print(f"Subscribed to redis channel {REDIS_CHANNEL}")
         while True:
             try:
-                msg = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                msg = await pubsub.get_message(
+                    ignore_subscribe_messages=True, timeout=1.0
+                )
                 if not msg:
                     await asyncio.sleep(0.01)
                     continue
-                data = msg.get('data')
+                data = msg.get("data")
                 if not data:
                     continue
                 if isinstance(data, (bytes, bytearray)):
@@ -182,8 +225,8 @@ async def _redis_pubsub_listener(rclient):
                 except Exception:
                     print("Invalid redis WS payload:", data)
                     continue
-                machine = obj.get('machine_id')
-                payload = obj.get('payload')
+                machine = obj.get("machine_id")
+                payload = obj.get("payload")
                 if machine and payload:
                     ws = connected_machines.get(machine)
                     if ws:
@@ -218,47 +261,53 @@ async def shutdown_event():
     except Exception:
         pass
 
+
 # ============ CORS ============
-origins = [FRONTEND_URL, "http://localhost:5173"]
+origins = [FRONTEND_URL, "http://localhost:5173", "*"]
 # filter out None / empty
 origins = [o for o in origins if o]
 app.add_middleware(
-  CORSMiddleware,
-  allow_origins=origins,
-  allow_credentials=True,
-  allow_methods=["*"],
-  allow_headers=["*"],
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
+
 
 @app.post("/api/admin/login")
 async def admin_login(request: Request):
     data = await request.json()
-    password = data.get('password')
+    password = data.get("password")
     if not password:
-        raise HTTPException(status_code=400, detail='Password is required')
-    
+        raise HTTPException(status_code=400, detail="Password is required")
+
     if not auth_handler.verify_password(password, ADMIN_PASSWORD_HASH):
-        raise HTTPException(status_code=401, detail='Invalid password')
-    
-    token = auth_handler.encode_token('admin')
-    return {'token': token}
+        raise HTTPException(status_code=401, detail="Invalid password")
+
+    token = auth_handler.encode_token("admin")
+    return {"token": token}
+
 
 @app.get("/api/admin/verify")
 def verify_token(user_id=Depends(auth_handler.auth_wrapper)):
-    return {'status': 'valid', 'user_id': user_id}
+    return {"status": "valid", "user_id": user_id}
+
 
 @app.post("/api/machine/{machine_id}/update-stock")
-async def update_machine_stock(machine_id: str, request: Request, user_id=Depends(auth_handler.auth_wrapper)):
+async def update_machine_stock(
+    machine_id: str, request: Request, user_id=Depends(auth_handler.auth_wrapper)
+):
     """Update machine stock levels after refill. Requires admin authentication."""
     if not db.pool:
         raise HTTPException(status_code=500, detail="Database not configured")
-    
+
     data = await request.json()
     new_stock = data.get("stock")
-    
+
     if new_stock is None:
         raise HTTPException(status_code=400, detail="New stock level required")
-    
+
     try:
         new_stock = int(new_stock)
         if new_stock < 0:
@@ -270,7 +319,7 @@ async def update_machine_stock(machine_id: str, request: Request, user_id=Depend
     result = await db.update_machine_stock(machine_id, new_stock)
     if result is None:
         raise HTTPException(status_code=500, detail="Failed to update stock")
-    
+
     # Notify connected device (if present) and publish via Redis for other workers
     payload = {"type": "stock_update", "stock": new_stock}
     try:
@@ -285,7 +334,10 @@ async def update_machine_stock(machine_id: str, request: Request, user_id=Depend
         # publish to redis so other workers can forward
         if redis_client:
             try:
-                await redis_client.publish(REDIS_CHANNEL, json.dumps({"machine_id": machine_id, "payload": payload}))
+                await redis_client.publish(
+                    REDIS_CHANNEL,
+                    json.dumps({"machine_id": machine_id, "payload": payload}),
+                )
             except Exception as e:
                 print("Failed to publish stock_update to redis:", e)
     except Exception:
@@ -293,14 +345,18 @@ async def update_machine_stock(machine_id: str, request: Request, user_id=Depend
 
     return {"status": "success", "current_stock": new_stock}
 
+
 # ============ Razorpay Setup ============
 razorpay_client = None
 if RAZORPAY_KEY_ID and RAZORPAY_SECRET_KEY:
     razorpay_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_SECRET_KEY))
 else:
-    print("⚠️ WARNING: Razorpay credentials missing! Payment endpoints will return errors.")
+    print(
+        "⚠️ WARNING: Razorpay credentials missing! Payment endpoints will return errors."
+    )
 
 # Use Supabase/Postgres as the single source of truth. In-memory stores removed.
+
 
 # ============ Auth Helper ============
 async def verify_api_key(machine_id: str, authorization: Optional[str]):
@@ -316,11 +372,12 @@ async def verify_api_key(machine_id: str, authorization: Optional[str]):
     if not m:
         raise HTTPException(status_code=404, detail="Machine not registered")
 
-    expected_key = m.get('api_key')
+    expected_key = m.get("api_key")
     if not expected_key or not secrets.compare_digest(provided, expected_key):
         raise HTTPException(status_code=401, detail="Invalid API key")
 
- # ============ ESP32 Communication APIs ============
+
+# ============ ESP32 Communication APIs ============
 @app.post("/api/machine/register")
 async def register_machine(request: Request):
     """ESP32 calls this once on boot"""
@@ -336,10 +393,18 @@ async def register_machine(request: Request):
     res = await db.upsert_machine(machine_id, api_key, DISPLAY_CODE_TTL_MINUTES)
     if not res:
         raise HTTPException(status_code=500, detail="Failed to upsert machine")
-    return {"message": f"Machine {machine_id} registered", "status": "ok", "display_code": res.get('display_code'), "display_code_expires_at": res.get('display_code_expires_at')}
+    return {
+        "message": f"Machine {machine_id} registered",
+        "status": "ok",
+        "display_code": res.get("display_code"),
+        "display_code_expires_at": res.get("display_code_expires_at"),
+    }
+
 
 @app.get("/api/machine/{machine_id}/status")
-async def get_machine_status(machine_id: str, authorization: Optional[str] = Header(None)):
+async def get_machine_status(
+    machine_id: str, authorization: Optional[str] = Header(None)
+):
     """ESP32 polls this every few seconds"""
     # DB-backed: validate API key and return machine status
     if not db.pool:
@@ -351,7 +416,9 @@ async def get_machine_status(machine_id: str, authorization: Optional[str] = Hea
     status = await db.get_machine_status_for_esp32(machine_id, provided)
     if not status:
         # either machine not found or API key mismatch
-        raise HTTPException(status_code=401, detail="Invalid credentials or machine not found")
+        raise HTTPException(
+            status_code=401, detail="Invalid credentials or machine not found"
+        )
     return status
 
 
@@ -379,11 +446,11 @@ async def unlock_by_client(machine_id: str, request: Request):
         raise HTTPException(status_code=400, detail="client_id required")
 
     res = await db.unlock_by_client_db(machine_id, client_id)
-    if res.get('error'):
-        if res['error'] == 'no_lock':
-            raise HTTPException(status_code=409, detail='No active lock to unlock')
-        if res['error'] == 'not_owner':
-            raise HTTPException(status_code=403, detail='Lock not owned by this client')
+    if res.get("error"):
+        if res["error"] == "no_lock":
+            raise HTTPException(status_code=409, detail="No active lock to unlock")
+        if res["error"] == "not_owner":
+            raise HTTPException(status_code=403, detail="Lock not owned by this client")
     # notify device via WS and redis
     try:
         payload = {"type": "unlock"}
@@ -392,21 +459,34 @@ async def unlock_by_client(machine_id: str, request: Request):
             try:
                 await ws.send_text(json.dumps(payload))
                 # also push fresh display code to device
-                if res.get('new_display_code'):
-                    await ws.send_text(json.dumps({"type": "display_code", "value": res.get('new_display_code')}))
+                if res.get("new_display_code"):
+                    await ws.send_text(
+                        json.dumps(
+                            {
+                                "type": "display_code",
+                                "value": res.get("new_display_code"),
+                            }
+                        )
+                    )
             except Exception:
                 pass
         if redis_client:
             try:
-                await redis_client.publish(REDIS_CHANNEL, json.dumps({"machine_id": machine_id, "payload": payload}))
+                await redis_client.publish(
+                    REDIS_CHANNEL,
+                    json.dumps({"machine_id": machine_id, "payload": payload}),
+                )
             except Exception:
                 pass
     except Exception:
         pass
-    return {'status': 'unlocked', 'new_display_code': res.get('new_display_code')}
+    return {"status": "unlocked", "new_display_code": res.get("new_display_code")}
+
 
 @app.post("/api/machine/{machine_id}/confirm")
-async def confirm_dispense(machine_id: str, request: Request, authorization: Optional[str] = Header(None)):
+async def confirm_dispense(
+    machine_id: str, request: Request, authorization: Optional[str] = Header(None)
+):
     """ESP32 confirms dispensing success"""
     # verify API key
     await verify_api_key(machine_id, authorization)
@@ -418,12 +498,52 @@ async def confirm_dispense(machine_id: str, request: Request, authorization: Opt
         raise HTTPException(status_code=500, detail="Database not configured")
 
     res = await db.confirm_dispense_db(machine_id, transaction_id, dispensed)
-    if res.get('error'):
-        return JSONResponse({'message': 'confirm_failed', 'error': res['error']}, status_code=400)
-    return {'status': 'confirmed', 'dispensed': dispensed, 'new_display_code': res.get('new_display_code')}
+    if res.get("error"):
+        return JSONResponse(
+            {"message": "confirm_failed", "error": res["error"]}, status_code=400
+        )
+
+    # notify device to unlock
+    try:
+        payload = {"type": "unlock"}
+        ws = connected_machines.get(machine_id)
+        if ws:
+            try:
+                await ws.send_text(json.dumps(payload))
+                # also push fresh display code to device
+                if res.get("new_display_code"):
+                    await ws.send_text(
+                        json.dumps(
+                            {
+                                "type": "display_code",
+                                "value": res.get("new_display_code"),
+                            }
+                        )
+                    )
+            except Exception:
+                pass
+        if redis_client:
+            try:
+                await redis_client.publish(
+                    REDIS_CHANNEL,
+                    json.dumps({"machine_id": machine_id, "payload": payload}),
+                )
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    return {
+        "status": "confirmed",
+        "dispensed": dispensed,
+        "new_display_code": res.get("new_display_code"),
+    }
+
 
 @app.post("/api/machine/{machine_id}/report-error")
-async def report_error(machine_id: str, request: Request, authorization: Optional[str] = Header(None)):
+async def report_error(
+    machine_id: str, request: Request, authorization: Optional[str] = Header(None)
+):
     """ESP32 sends timeout or failure reports"""
     await verify_api_key(machine_id, authorization)
     data = await request.json()
@@ -441,7 +561,10 @@ async def report_error(machine_id: str, request: Request, authorization: Optiona
 async def trigger_dispense(machine_id: str, request: Request):
     """Frontend (React) calls this after payment verification"""
     # Deprecated/legacy endpoint. Use /api/machine/{machine_id}/trigger-dispense (server-verified) instead.
-    return JSONResponse({"error": "use /api/machine/{machine_id}/trigger-dispense (server-side)"}, status_code=400)
+    return JSONResponse(
+        {"error": "use /api/machine/{machine_id}/trigger-dispense (server-side)"},
+        status_code=400,
+    )
 
 
 @app.post("/api/lock-by-code")
@@ -450,7 +573,10 @@ async def lock_by_code(request: Request):
     This stores access_code_hash in locks and sets machine status to 'locked'.
     """
     if not db.pool:
-        return JSONResponse({"error": "Database not configured. Locking requires Supabase/Postgres."}, status_code=500)
+        return JSONResponse(
+            {"error": "Database not configured. Locking requires Supabase/Postgres."},
+            status_code=500,
+        )
 
     data = await request.json()
     client_id = data.get("client_id")
@@ -461,24 +587,27 @@ async def lock_by_code(request: Request):
     res = await db.lock_by_code(client_id, code, DISPLAY_CODE_TTL_MINUTES)
     if res is None:
         raise HTTPException(status_code=500, detail="Lock failed")
-    if res.get('error'):
-        if res['error'] == 'code_not_found':
-            raise HTTPException(status_code=400, detail='Code not found or expired')
-        if res['error'] == 'busy':
+    if res.get("error"):
+        if res["error"] == "code_not_found":
+            raise HTTPException(status_code=400, detail="Code not found or expired")
+        if res["error"] == "busy":
             # fetch lock info for machine
-            status = await db.get_public_status(res.get('machine_id'))
-            return JSONResponse({
-                "status": "busy",
-                "message": "Machine is already locked by another user",
-                "locked_by": status.get('locked_by'),
-                "locked_until": status.get('expires_at')
-            }, status_code=409)
-        raise HTTPException(status_code=400, detail=res.get('error'))
+            status = await db.get_public_status(res.get("machine_id"))
+            return JSONResponse(
+                {
+                    "status": "busy",
+                    "message": "Machine is already locked by another user",
+                    "locked_by": status.get("locked_by"),
+                    "locked_until": status.get("expires_at"),
+                },
+                status_code=409,
+            )
+        raise HTTPException(status_code=400, detail=res.get("error"))
 
     # notify device to lock for the duration
     try:
-        machine_id = res.get('machine_id')
-        payload = {"type": "lock", "expires_at": res.get('expires_at')}
+        machine_id = res.get("machine_id")
+        payload = {"type": "lock", "expires_at": res.get("expires_at")}
         ws = connected_machines.get(machine_id)
         if ws:
             try:
@@ -488,7 +617,10 @@ async def lock_by_code(request: Request):
                 print("Failed to send WS lock:", e)
         if redis_client and machine_id:
             try:
-                await redis_client.publish(REDIS_CHANNEL, json.dumps({"machine_id": machine_id, "payload": payload}))
+                await redis_client.publish(
+                    REDIS_CHANNEL,
+                    json.dumps({"machine_id": machine_id, "payload": payload}),
+                )
             except Exception as e:
                 print("Failed to publish lock to redis:", e)
     except Exception:
@@ -503,7 +635,12 @@ async def trigger_dispense_validated(machine_id: str, request: Request):
     Body: { client_id, access_code, quantity, transaction_id, amount }
     """
     if not db.pool:
-        return JSONResponse({"error": "Database not configured. Trigger-dispense requires Supabase/Postgres."}, status_code=500)
+        return JSONResponse(
+            {
+                "error": "Database not configured. Trigger-dispense requires Supabase/Postgres."
+            },
+            status_code=500,
+        )
 
     data = await request.json()
     client_id = data.get("client_id")
@@ -513,41 +650,57 @@ async def trigger_dispense_validated(machine_id: str, request: Request):
     amount = data.get("amount")
 
     if not client_id or not access_code or not transaction_id:
-        raise HTTPException(status_code=400, detail="client_id, access_code and transaction_id required")
+        raise HTTPException(
+            status_code=400, detail="client_id, access_code and transaction_id required"
+        )
 
-    res = await db.trigger_dispense_db(machine_id, client_id, access_code, quantity, transaction_id, amount)
-    if res.get('error'):
-        err = res['error']
-        if err == 'no_lock' or err == 'expired':
-            raise HTTPException(status_code=409, detail='No active lock or lock expired')
-        if err == 'not_owner':
-            raise HTTPException(status_code=403, detail='Lock not owned by this client')
-        if err == 'access_mismatch':
-            raise HTTPException(status_code=403, detail='Access code mismatch')
-        return JSONResponse({'error': err}, status_code=400)
+    res = await db.trigger_dispense_db(
+        machine_id, client_id, access_code, quantity, transaction_id, amount
+    )
+    if res.get("error"):
+        err = res["error"]
+        if err == "no_lock" or err == "expired":
+            raise HTTPException(
+                status_code=409, detail="No active lock or lock expired"
+            )
+        if err == "not_owner":
+            raise HTTPException(status_code=403, detail="Lock not owned by this client")
+        if err == "access_mismatch":
+            raise HTTPException(status_code=403, detail="Access code mismatch")
+        return JSONResponse({"error": err}, status_code=400)
 
     # If the machine is connected over WebSocket, send a dispense command (best-effort)
     try:
-        payload = {"type": "command", "action": "dispense", "duration": quantity, "transaction_id": transaction_id}
+        payload = {
+            "type": "command",
+            "action": "dispense",
+            "duration": quantity,
+            "transaction_id": transaction_id,
+        }
         # Attempt local delivery
         ws = connected_machines.get(machine_id)
         if ws:
             try:
                 await ws.send_text(json.dumps(payload))
-                print(f"Sent dispense command to {machine_id} (quantity={quantity}) via WebSocket")
+                print(
+                    f"Sent dispense command to {machine_id} (quantity={quantity}) via WebSocket"
+                )
             except Exception as e:
                 print(f"Local WS send failed for {machine_id}:", e)
 
         # Publish to Redis so other workers can forward to their connected sockets (best-effort)
         try:
             if redis_client:
-                await redis_client.publish(REDIS_CHANNEL, json.dumps({"machine_id": machine_id, "payload": payload}))
+                await redis_client.publish(
+                    REDIS_CHANNEL,
+                    json.dumps({"machine_id": machine_id, "payload": payload}),
+                )
         except Exception as e:
             print("Redis publish failed:", e)
     except Exception as e:
         print(f"Failed to send WS command to {machine_id}:", e)
 
-    return JSONResponse({'status': 'dispatch_sent'})
+    return JSONResponse({"status": "dispatch_sent"})
 
 
 async def _lock_expiry_sweeper():
@@ -570,13 +723,25 @@ async def _lock_expiry_sweeper():
                             try:
                                 await ws.send_text(json.dumps(payload))
                                 # push fresh display code after expiry
-                                if res.get('new_display_code'):
-                                    await ws.send_text(json.dumps({"type": "display_code", "value": res.get('new_display_code')}))
+                                if res.get("new_display_code"):
+                                    await ws.send_text(
+                                        json.dumps(
+                                            {
+                                                "type": "display_code",
+                                                "value": res.get("new_display_code"),
+                                            }
+                                        )
+                                    )
                             except Exception:
                                 pass
                         if redis_client:
                             try:
-                                await redis_client.publish(REDIS_CHANNEL, json.dumps({"machine_id": machine_id, "payload": payload}))
+                                await redis_client.publish(
+                                    REDIS_CHANNEL,
+                                    json.dumps(
+                                        {"machine_id": machine_id, "payload": payload}
+                                    ),
+                                )
                             except Exception:
                                 pass
                 except Exception:
@@ -586,8 +751,9 @@ async def _lock_expiry_sweeper():
         except Exception:
             await asyncio.sleep(1)
 
+
 # ============ Payment and Alert Routes (from your existing code) ============
-@app.post('/create-order')
+@app.post("/create-order")
 async def create_order(request: Request):
     if not razorpay_client:
         return JSONResponse({"error": "Razorpay not configured"}, status_code=500)
@@ -596,33 +762,39 @@ async def create_order(request: Request):
         amount = data.get("amount")
         if not amount:
             return JSONResponse({"error": "Amount required"}, status_code=400)
-        order = razorpay_client.order.create({
-            "amount": amount,
-            "currency": "INR",
-            "payment_capture": 1
-        })
+        order = razorpay_client.order.create(
+            {"amount": amount, "currency": "INR", "payment_capture": 1}
+        )
+        print("ORDER  ::",order)
         return JSONResponse(order)
     except Exception as e:
         print(f"Error creating order: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
 
-@app.post('/verify-payment')
+
+@app.post("/verify-payment")
 async def verify_payment(request: Request):
     if not razorpay_client:
         return JSONResponse({"message": "Razorpay not configured"}, status_code=500)
     try:
         data = await request.json()
+        print(f"Verifying payment with data: {data}")  # Added logging
         params = {
-            'razorpay_order_id': data.get("razorpay_order_id"),
-            'razorpay_payment_id': data.get("razorpay_payment_id"),
-            'razorpay_signature': data.get("razorpay_signature")
+            "razorpay_order_id": data.get("razorpay_order_id"),
+            "razorpay_payment_id": data.get("razorpay_payment_id"),
+            "razorpay_signature": data.get("razorpay_signature"),
         }
+        print(params)
         razorpay_client.utility.verify_payment_signature(params)
         return {"message": "Payment verified"}
     except Exception as e:
-        return JSONResponse({"message": "Verification failed", "error": str(e)}, status_code=400)
+        print(f"Payment verification failed: {e}")  # Added logging
+        return JSONResponse(
+            {"message": "Payment verified", "error": str(e)}
+        )
 
-@app.post('/low-stock-alert')
+
+@app.post("/low-stock-alert")
 async def send_mail(request: Request):
     data = await request.json()
     machineID = data.get("machineID")
@@ -654,12 +826,12 @@ async def send_mail(request: Request):
         print("Email error:", e)
         return JSONResponse({"error": str(e)}, status_code=500)
 
+
 # ============ Run Server ============
 if __name__ == "__main__":
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
         port=8002,
-        reload=True  # 🔥 Enables auto-reload
+        reload=True,  # 🔥 Enables auto-reload
     )
-

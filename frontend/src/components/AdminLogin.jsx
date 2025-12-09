@@ -55,6 +55,7 @@ export default function AdminLogin({ onSuccess, onBack }) {
       }
     } catch (err) {
       console.error('Login error:', err);
+      alert(err);
       setAuthError("Login failed. Please try again.");
     }
   };
