@@ -1,4 +1,5 @@
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 
 #include <WebSocketsClient.h>
 
@@ -13,15 +14,12 @@
 // ===== WiFi & Server =====
 
 const char* ssid = "Goutham's Galaxy";
-
 const char* password = "23456789";
 
-const char* serverHost = "10.21.175.195";  // Backend host (LAN IP of FastAPI)
-
-const char* serverHttps = "http://10.21.175.195:8002";  // HTTP API endpoint
-
-const int serverPort = 8002;
-
+// Render deployment host and HTTPS/WebSocket settings
+const char* serverHost = "smartvend.onrender.com";  // Render host
+const char* serverHttps = "https://smartvend.onrender.com";  // HTTPS API endpoint
+const int serverPort = 443;
 const char* serverPath = "/ws";
 
 // Unique identifier for this machine (set to your machine's ID)
@@ -83,18 +81,16 @@ const unsigned long BASE_RUN_TIME = 2000;   // 2 seconds per unit (adjust to you
 
 
 unsigned long lastPost = 0;
-
 unsigned long lastFetch = 0;
-
+unsigned long lastCommandPoll = 0;
 unsigned long lockStartTime = 0;
 
-
-
 String currentDisplayCode = "----"; // default blank code
-
 String currentTransactionId = ""; // to hold transaction ID during dispense
-
 unsigned long dispenseQuantity = 0; // to hold quantity for confirmation
+
+// networking clients
+WiFiClientSecure secureClient;
 
 
 
@@ -229,10 +225,11 @@ void sendConfirmation(unsigned long dispensed_qty) {
   if (WiFi.status() == WL_CONNECTED) {
 
     HTTPClient http;
+    secureClient.setInsecure(); // TODO: pin CA for production
 
     String url = String(serverHttps) + "/api/machine/" + machine_id + "/confirm";
 
-    http.begin(url);
+    http.begin(secureClient, url);
 
     http.addHeader("Content-Type", "application/json");
 
@@ -286,6 +283,27 @@ void sendConfirmation(unsigned long dispensed_qty) {
 
 }
 
+
+bool waitForHealth() {
+  // Render free tier may cold start; poll /health with simple backoff
+  for (int attempt = 0; attempt < 5; attempt++) {
+    HTTPClient http;
+    secureClient.setInsecure(); // TODO: pin CA for production
+    String url = String(serverHttps) + "/health";
+    if (http.begin(secureClient, url)) {
+      int code = http.GET();
+      http.end();
+      if (code == 200) {
+        Serial.println("Backend health OK");
+        return true;
+      }
+    }
+    unsigned long backoff = 500 * (attempt + 1);
+    Serial.printf("Health check retry in %lums\n", backoff);
+    delay(backoff);
+  }
+  return false;
+}
 
 
 // ===== WebSocket Event Handler =====
@@ -488,11 +506,16 @@ void setup() {
 
   updateLCD("WiFi Connected", "");
 
+  // Cold start guard
+  waitForHealth();
 
 
-  // WebSocket setup
 
-  webSocket.begin(serverHost, serverPort, serverPath);
+  // HTTPS client
+  secureClient.setInsecure(); // TODO: pin CA for production
+
+  // WebSocket setup over TLS (wss)
+  webSocket.beginSSL(serverHost, serverPort, serverPath);
 
   webSocket.onEvent(webSocketEvent);
 
@@ -522,6 +545,47 @@ void loop() {
 
       lastPost = now;
 
+    }
+
+    // HTTP command polling fallback when WS is unavailable
+    if ((now - lastCommandPoll > 15000) && webSocket.isConnected() == false) {
+      HTTPClient http;
+      secureClient.setInsecure(); // TODO: pin CA for production
+      String url = String(serverHttps) + "/device/commands/" + machine_id;
+      if (http.begin(secureClient, url)) {
+        int httpCode = http.GET();
+        if (httpCode == 200) {
+          String payload = http.getString();
+          StaticJsonDocument<512> doc;
+          if (deserializeJson(doc, payload) == DeserializationError::Ok) {
+            JsonArray cmds = doc["commands"].as<JsonArray>();
+            for (JsonObject cmd : cmds) {
+              const char* type = cmd["type"] | "";
+              if (strcmp(type, "lock") == 0 && state == UNLOCKED) {
+                state = LOCKED;
+                lockStartTime = millis();
+                updateLCD("Locked", "Waiting...");
+              } else if (strcmp(type, "unlock") == 0) {
+                state = UNLOCKED;
+                updateLCD("Unlocked", ("Code: " + currentDisplayCode).c_str());
+                fetchDisplayCode();
+              } else if (strcmp(type, "command") == 0) {
+                const char* action = cmd["action"] | "";
+                if (strcmp(action, "dispense") == 0 && state == LOCKED) {
+                  currentTransactionId = cmd["transaction_id"].as<String>();
+                  dispenseQuantity = cmd["duration"] | 1;
+                  unsigned long duration = (cmd.containsKey("duration_sec")
+                                                ? cmd["duration_sec"].as<unsigned long>() * 1000UL
+                                                : dispenseQuantity * BASE_RUN_TIME);
+                  motorRunForward(duration);
+                }
+              }
+            }
+          }
+        }
+        http.end();
+      }
+      lastCommandPoll = now;
     }
 
 

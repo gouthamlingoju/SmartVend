@@ -1,44 +1,109 @@
+import asyncio
+import contextlib
+import json
+import os
+import secrets
+import smtplib
+from contextlib import asynccontextmanager
+from datetime import datetime
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from typing import Any, Dict, List, Optional
+
+import razorpay
+import redis.asyncio as aioredis
+import uvicorn
 from fastapi import (
+    Depends,
     FastAPI,
-    Request,
-    HTTPException,
     Header,
+    HTTPException,
+    Request,
     WebSocket,
     WebSocketDisconnect,
-    Depends,
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.security import HTTPBearer
-from typing import Optional
+from pydantic import BaseModel, Field, constr
+
 from auth import AuthHandler
-import secrets
-import razorpay
-import json
-import asyncio
-import redis.asyncio as aioredis
-import uvicorn
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 import database as db
 from config import (
+    ADMIN_PASSWORD,
+    DISPLAY_CODE_TTL_MINUTES,
     FRONTEND_URL,
     RAZORPAY_KEY_ID,
     RAZORPAY_SECRET_KEY,
-    DISPLAY_CODE_TTL_MINUTES,
+    RECEIVER_EMAIL,
+    REDIS_URL,
     SENDER_EMAIL,
     SENDER_PASSWORD,
-    RECEIVER_EMAIL,
-    SMTP_SERVER,
     SMTP_PORT,
-    REDIS_URL,
-    ADMIN_PASSWORD,
+    SMTP_SERVER,
 )
 
 # Load environment variables
 
-app = FastAPI(title="SmartVend Cloud Backend")
+pending_http_commands: Dict[str, List[Dict[str, Any]]] = {}
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Start/stop resources in a Render-friendly way."""
+    global redis_client, redis_listener_task, lock_sweeper_task
+    try:
+        await db.init_pool()
+        if db.pool:
+            print("DB pool initialized")
+    except Exception as e:
+        print("DB pool init error:", e)
+
+    try:
+        if REDIS_URL:
+            redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
+            redis_listener_task = asyncio.create_task(
+                _redis_pubsub_listener(redis_client)
+            )
+            print("Redis pubsub listener started")
+    except Exception as e:
+        print("Redis init error:", e)
+
+    try:
+        lock_sweeper_task = asyncio.create_task(_lock_expiry_sweeper())
+        print("Lock expiry sweeper started")
+    except Exception as e:
+        print("Lock sweeper start error:", e)
+
+    try:
+        yield
+    finally:
+        try:
+            if lock_sweeper_task:
+                lock_sweeper_task.cancel()
+                with contextlib.suppress(Exception):
+                    await lock_sweeper_task
+        except Exception:
+            pass
+        try:
+            if redis_listener_task:
+                redis_listener_task.cancel()
+                with contextlib.suppress(Exception):
+                    await redis_listener_task
+        except Exception:
+            pass
+        try:
+            if redis_client:
+                with contextlib.suppress(Exception):
+                    await redis_client.close()
+        except Exception:
+            pass
+        try:
+            await db.close_pool()
+        except Exception:
+            pass
+
+
+app = FastAPI(title="SmartVend Cloud Backend", lifespan=lifespan)
 
 # Initialize auth handler
 auth_handler = AuthHandler()
@@ -52,35 +117,6 @@ redis_client = None
 redis_listener_task = None
 lock_sweeper_task = None
 REDIS_CHANNEL = "ws:commands"
-
-
-@app.on_event("startup")
-async def startup_event():
-    # initialize DB pool if DATABASE_URL provided
-    try:
-        await db.init_pool()
-        if db.pool:
-            print("✅ DB pool initialized")
-    except Exception as e:
-        print("DB pool init error:", e)
-    # Start Redis pubsub listener for cross-worker WebSocket messages
-    global redis_client, redis_listener_task, lock_sweeper_task
-    try:
-        if REDIS_URL:
-            redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
-            # start background task to listen for published ws commands
-            redis_listener_task = asyncio.create_task(
-                _redis_pubsub_listener(redis_client)
-            )
-            print("✅ Redis pubsub listener started")
-    except Exception as e:
-        print("Redis init error:", e)
-    # start lock expiry sweeper
-    try:
-        lock_sweeper_task = asyncio.create_task(_lock_expiry_sweeper())
-        print("✅ Lock expiry sweeper started")
-    except Exception as e:
-        print("Lock sweeper start error:", e)
 
 
 @app.websocket("/ws")
@@ -107,7 +143,15 @@ async def websocket_endpoint(websocket: WebSocket):
 
     try:
         while True:
-            data = await websocket.receive_text()
+            try:
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=75)
+            except asyncio.TimeoutError:
+                # keep-alive on idle
+                try:
+                    await websocket.send_text(json.dumps({"type": "ping"}))
+                except Exception:
+                    break
+                continue
             try:
                 msg = json.loads(data)
             except Exception:
@@ -249,17 +293,19 @@ async def _redis_pubsub_listener(rclient):
             pass
 
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    try:
-        await db.close_pool()
-    except Exception:
-        pass
-    try:
-        if lock_sweeper_task:
-            lock_sweeper_task.cancel()
-    except Exception:
-        pass
+class TelemetryPayload(BaseModel):
+    proto: int = Field(1, ge=1, le=1)
+    device_id: constr(strip_whitespace=True, min_length=1)
+    status: Optional[str] = None
+    rssi: Optional[int] = Field(None, ge=-120, le=0)
+    battery: Optional[float] = Field(None, ge=0, le=100)
+    ts: Optional[datetime] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+
+class CommandResponse(BaseModel):
+    commands: List[Dict[str, Any]]
+    count: int
 
 
 # ============ CORS ============
@@ -273,6 +319,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.get("/health")
+async def health_check():
+    return {"status": "ok"}
 
 
 @app.post("/api/admin/login")
@@ -296,8 +347,7 @@ def verify_token(user_id=Depends(auth_handler.auth_wrapper)):
 
 @app.post("/api/machine/{machine_id}/update-stock")
 async def update_machine_stock(
-    machine_id: str, request: Request, user_id=Depends(auth_handler.auth_wrapper)
-):
+    machine_id: str, request: Request, user_id=Depends(auth_handler.auth_wrapper)):
     """Update machine stock levels after refill. Requires admin authentication."""
     if not db.pool:
         raise HTTPException(status_code=500, detail="Database not configured")
@@ -351,9 +401,7 @@ razorpay_client = None
 if RAZORPAY_KEY_ID and RAZORPAY_SECRET_KEY:
     razorpay_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_SECRET_KEY))
 else:
-    print(
-        "⚠️ WARNING: Razorpay credentials missing! Payment endpoints will return errors."
-    )
+    print("WARNING: Razorpay credentials missing; payment endpoints will return errors.")
 
 # Use Supabase/Postgres as the single source of truth. In-memory stores removed.
 
@@ -403,8 +451,7 @@ async def register_machine(request: Request):
 
 @app.get("/api/machine/{machine_id}/status")
 async def get_machine_status(
-    machine_id: str, authorization: Optional[str] = Header(None)
-):
+    machine_id: str, authorization: Optional[str] = Header(None)):
     """ESP32 polls this every few seconds"""
     # DB-backed: validate API key and return machine status
     if not db.pool:
@@ -454,6 +501,7 @@ async def unlock_by_client(machine_id: str, request: Request):
     # notify device via WS and redis
     try:
         payload = {"type": "unlock"}
+        pending_http_commands.setdefault(machine_id, []).append(payload)
         ws = connected_machines.get(machine_id)
         if ws:
             try:
@@ -548,7 +596,7 @@ async def report_error(
     await verify_api_key(machine_id, authorization)
     data = await request.json()
     err = data.get("error")
-    print(f"⚠️ Error from machine {machine_id}: {err}")
+    print(f"Error from machine {machine_id}: {err}")
     # Optionally, we could write this to an events table. For now just ack.
     return {"message": "Error logged"}
 
@@ -608,6 +656,8 @@ async def lock_by_code(request: Request):
     try:
         machine_id = res.get("machine_id")
         payload = {"type": "lock", "expires_at": res.get("expires_at")}
+        if machine_id:
+            pending_http_commands.setdefault(machine_id, []).append(payload)
         ws = connected_machines.get(machine_id)
         if ws:
             try:
@@ -677,6 +727,7 @@ async def trigger_dispense_validated(machine_id: str, request: Request):
             "duration": quantity,
             "transaction_id": transaction_id,
         }
+        pending_http_commands.setdefault(machine_id, []).append(payload)
         # Attempt local delivery
         ws = connected_machines.get(machine_id)
         if ws:
@@ -703,6 +754,27 @@ async def trigger_dispense_validated(machine_id: str, request: Request):
     return JSONResponse({"status": "dispatch_sent"})
 
 
+@app.post("/device/telemetry")
+async def ingest_telemetry(payload: TelemetryPayload):
+    """HTTP fallback when WS is unavailable; best-effort status update."""
+    device_id = payload.device_id
+    if db.pool:
+        try:
+            await db.set_machine_last_seen(device_id)
+            if payload.status in {"active", "idle", "locked"}:
+                await db.update_machine_status(device_id, payload.status)
+        except Exception as e:
+            print(f"Telemetry update error for {device_id}: {e}")
+    return {"status": "ok", "proto": payload.proto}
+
+
+@app.get("/device/commands/{device_id}", response_model=CommandResponse)
+async def get_device_commands(device_id: str):
+    """HTTP polling fallback for ESP32 when WS is unavailable."""
+    cmds = pending_http_commands.pop(device_id, [])
+    return CommandResponse(commands=cmds, count=len(cmds))
+
+
 async def _lock_expiry_sweeper():
     """Periodically checks for expired locks and unlocks machines, rotates display codes,
     and notifies devices via websocket/redis.
@@ -718,6 +790,9 @@ async def _lock_expiry_sweeper():
                     res = await db.expire_lock_and_rotate_code(machine_id)
                     if res:
                         payload = {"type": "unlock"}
+                        pending_http_commands.setdefault(machine_id, []).append(
+                            payload
+                        )
                         ws = connected_machines.get(machine_id)
                         if ws:
                             try:
@@ -790,8 +865,8 @@ async def verify_payment(request: Request):
     except Exception as e:
         print(f"Payment verification failed: {e}")  # Added logging
         return JSONResponse(
-            {"message": "Payment verified", "error": str(e)}
-        )
+            {"message": "Verification failed", "error": str(e)},
+            status_code=400)        
 
 
 @app.post("/low-stock-alert")
@@ -820,7 +895,7 @@ async def send_mail(request: Request):
             server.starttls()
             server.login(sender, password)
             server.send_message(msg)
-        print(f"📧 Low stock alert sent for {machineID}")
+        print(f"Low stock alert sent for {machineID}")
         return {"message": "Email sent"}
     except Exception as e:
         print("Email error:", e)
@@ -829,9 +904,11 @@ async def send_mail(request: Request):
 
 # ============ Run Server ============
 if __name__ == "__main__":
+    port = int(os.getenv("PORT", "8002"))
+    reload_enabled = os.getenv("RELOAD", "").lower() == "true"
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=8002,
-        reload=True,  # 🔥 Enables auto-reload
+        port=port,
+        reload=reload_enabled,
     )

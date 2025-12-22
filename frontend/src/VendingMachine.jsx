@@ -3,7 +3,8 @@ import FeedbackForm from "./components/FeedbackForm";
 import supabase from "./supabase"; // added import
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL;
-const RAZORPAY_KEY_ID = "rzp_test_9wMmdAOOz3dAXZ";
+
+const RAZORPAY_KEY_ID = import.meta.env.VITE_RAZORPAY_KEY_ID;
 export default function VendingMachine({ machine, onBack }) {
   const [availablePads, setAvailablePads] = useState(machine.current_stock);
   const [selectedPads, setSelectedPads] = useState(1);
