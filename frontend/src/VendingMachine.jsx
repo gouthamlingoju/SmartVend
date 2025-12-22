@@ -3,6 +3,7 @@ import FeedbackForm from "./components/FeedbackForm";
 import supabase from "./supabase"; // added import
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL;
+const PRICE_PER_UNIT = Number(import.meta.env.VITE_PRICE_PER_UNIT || 1); // INR
 const RAZORPAY_KEY_ID = "rzp_live_4WjBpr2oPoM84e";
 export default function VendingMachine({ machine, onBack }) {
   const [availablePads, setAvailablePads] = useState(machine.current_stock);
@@ -187,9 +188,9 @@ export default function VendingMachine({ machine, onBack }) {
       const response = await fetch(`${BACKEND_URL}/create-order`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        // amount in paise; include transaction metadata so backend can link if desired
+        // amount calculated on server from quantity and env price
         body: JSON.stringify({
-          amount: selectedPads * 100,
+          quantity: selectedPads,
           metadata: {
             transaction_id: txId,
             client_id: clientId,
@@ -247,7 +248,8 @@ export default function VendingMachine({ machine, onBack }) {
                   access_code: accessCodeInput,
                   quantity: selectedPads,
                   transaction_id: txId,
-                  amount: selectedPads * 100,
+                  // amount calculated on server from quantity and env price
+                  quantity: selectedPads,
                 }),
               },
             );
@@ -378,6 +380,7 @@ export default function VendingMachine({ machine, onBack }) {
                             body: JSON.stringify({ client_id: clientId }),
                           },
                         );
+                        alert(res);
                         if (!res.ok) {
                           const e = await res
                             .json()
@@ -523,7 +526,7 @@ export default function VendingMachine({ machine, onBack }) {
           <div className="flex justify-between items-center mb-6">
             <p className="text-lg text-gray-600">Total Price:</p>
             <p className="text-2xl font-bold text-purple-700">
-              ₹{selectedPads * 1}
+              ₹{selectedPads * PRICE_PER_UNIT}
             </p>
           </div>
           <div className="flex flex-col space-y-4">

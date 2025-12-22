@@ -9,6 +9,8 @@
 
 #include <HTTPClient.h>
 
+#include <WebServer.h>
+
 
 
 // ===== WiFi & Server =====
@@ -34,6 +36,9 @@ const char* machine_api_key = "sv_001mmsg";
 
 WebSocketsClient webSocket;
 
+// Web server for local control interface
+WebServer server(80);
+
 
 
 // ===== LCD Setup =====
@@ -50,11 +55,14 @@ const int IN1 = 26;
 
 const int IN2 = 27;
 
+// Built-in LED pin (GPIO 2 for most ESP32 boards)
+const int LED_BUILTIN_PIN = 2;
+
 
 
 // ===== State Machine =====
 
-Enum DeviceState { UNLOCKED, LOCKED };
+enum DeviceState { UNLOCKED, LOCKED };
 
 DeviceState state = UNLOCKED;
 
@@ -89,6 +97,14 @@ String currentDisplayCode = "----"; // default blank code
 String currentTransactionId = ""; // to hold transaction ID during dispense
 unsigned long dispenseQuantity = 0; // to hold quantity for confirmation
 
+// LCD display lines for web interface
+String lcdLine1 = "";
+String lcdLine2 = "";
+
+// Manual motor control variables
+int manualMotorSpeed = 200; // Default speed (0-255)
+bool manualMotorControl = false; // Flag to indicate manual control
+
 // networking clients
 WiFiClientSecure secureClient;
 
@@ -107,6 +123,11 @@ void updateLCD(const char* line1, const char* line2 = "") {
   lcd.setCursor(0, 1);
 
   lcd.print(line2);
+
+  
+  // Store for web interface
+  lcdLine1 = String(line1);
+  lcdLine2 = String(line2);
 
 
 
@@ -131,6 +152,8 @@ void motorStop() {
   digitalWrite(IN2, LOW);
 
   analogWrite(ENA, 0);
+  
+  digitalWrite(LED_BUILTIN_PIN, LOW); // Turn off LED when motor stops
 
   Serial.println("Motor stopped");
 
@@ -145,6 +168,8 @@ void motorRunForward(unsigned long durationMs) {
   digitalWrite(IN2, LOW);
 
   analogWrite(ENA, 200); // Adjust speed (0–255)
+  
+  digitalWrite(LED_BUILTIN_PIN, HIGH); // Turn on LED when motor runs
 
   motorRunning = true;
 
@@ -303,6 +328,69 @@ bool waitForHealth() {
     delay(backoff);
   }
   return false;
+}
+
+
+// ===== Web Server Functions =====
+
+void handleRoot() {
+  String html = "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><title>SmartVend Control Panel</title><style>*{margin:0;padding:0;box-sizing:border-box;}body{font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);min-height:100vh;padding:20px;display:flex;justify-content:center;align-items:center;}.container{background:white;border-radius:20px;box-shadow:0 20px 60px rgba(0,0,0,0.3);padding:30px;max-width:600px;width:100%;}h1{color:#333;margin-bottom:30px;text-align:center;font-size:28px;}.status-section{background:#f5f5f5;border-radius:15px;padding:20px;margin-bottom:30px;border:2px solid #e0e0e0;}.status-title{font-size:18px;font-weight:bold;color:#555;margin-bottom:15px;text-align:center;}.lcd-display{background:#1a1a1a;color:#00ff00;font-family:'Courier New',monospace;padding:20px;border-radius:10px;text-align:center;margin-bottom:15px;box-shadow:inset 0 2px 10px rgba(0,0,0,0.5);}.lcd-line{font-size:20px;margin:8px 0;min-height:28px;display:flex;align-items:center;justify-content:center;}.status-info{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:15px;}.status-item{background:white;padding:10px;border-radius:8px;text-align:center;}.status-label{font-size:12px;color:#888;margin-bottom:5px;}.status-value{font-size:18px;font-weight:bold;color:#333;}.status-value.locked{color:#e74c3c;}.status-value.unlocked{color:#27ae60;}.status-value.running{color:#3498db;}.status-value.stopped{color:#95a5a6;}.control-section{margin-top:30px;}.control-title{font-size:18px;font-weight:bold;color:#555;margin-bottom:20px;text-align:center;}.control-group{margin-bottom:25px;}label{display:block;margin-bottom:8px;color:#555;font-weight:500;}.speed-control{display:flex;align-items:center;gap:15px;}input[type=\"range\"]{flex:1;height:8px;border-radius:5px;background:#ddd;outline:none;-webkit-appearance:none;}input[type=\"range\"]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:20px;height:20px;border-radius:50%;background:#667eea;cursor:pointer;}input[type=\"range\"]::-moz-range-thumb{width:20px;height:20px;border-radius:50%;background:#667eea;cursor:pointer;border:none;}.speed-value{font-size:18px;font-weight:bold;color:#667eea;min-width:50px;text-align:center;}.button-group{display:grid;grid-template-columns:1fr 1fr;gap:15px;margin-top:20px;}button{padding:15px 30px;border:none;border-radius:10px;font-size:16px;font-weight:bold;cursor:pointer;transition:all 0.3s;text-transform:uppercase;letter-spacing:1px;}button:hover{transform:translateY(-2px);box-shadow:0 5px 15px rgba(0,0,0,0.2);}button:active{transform:translateY(0);}.btn-start{background:linear-gradient(135deg,#27ae60,#2ecc71);color:white;}.btn-stop{background:linear-gradient(135deg,#e74c3c,#c0392b);color:white;}.auto-refresh{text-align:center;margin-top:20px;color:#888;font-size:12px;}</style></head><body><div class=\"container\"><h1>SmartVend Control Panel</h1><div class=\"status-section\"><div class=\"status-title\">LCD Display</div><div class=\"lcd-display\"><div class=\"lcd-line\" id=\"lcdLine1\">----</div><div class=\"lcd-line\" id=\"lcdLine2\">----</div></div><div class=\"status-info\"><div class=\"status-item\"><div class=\"status-label\">Machine State</div><div class=\"status-value\" id=\"machineState\">UNLOCKED</div></div><div class=\"status-item\"><div class=\"status-label\">Motor Status</div><div class=\"status-value\" id=\"motorStatus\">STOPPED</div></div><div class=\"status-item\"><div class=\"status-label\">Display Code</div><div class=\"status-value\" id=\"displayCode\">----</div></div><div class=\"status-item\"><div class=\"status-label\">Motor Speed</div><div class=\"status-value\" id=\"currentSpeed\">200</div></div></div></div><div class=\"control-section\"><div class=\"control-title\">Motor Control</div><div class=\"control-group\"><label>Motor Speed: <span class=\"speed-value\" id=\"speedDisplay\">200</span> / 255</label><div class=\"speed-control\"><input type=\"range\" id=\"speedSlider\" min=\"0\" max=\"255\" value=\"200\" oninput=\"updateSpeed(this.value)\"><span class=\"speed-value\" id=\"speedValue\">200</span></div></div><div class=\"button-group\"><button class=\"btn-start\" onclick=\"startMotor()\">Start Motor</button><button class=\"btn-stop\" onclick=\"stopMotor()\">Stop Motor</button></div></div><div class=\"auto-refresh\">Status updates every 1 second</div></div><script>let currentSpeed=200;function updateSpeed(value){currentSpeed=parseInt(value);document.getElementById('speedDisplay').textContent=currentSpeed;document.getElementById('speedValue').textContent=currentSpeed;}function startMotor(){fetch('/motor/start?speed='+currentSpeed,{method:'POST'}).then(r=>r.json()).then(data=>{console.log('Motor started:',data);}).catch(e=>console.error('Error:',e));}function stopMotor(){fetch('/motor/stop',{method:'POST'}).then(r=>r.json()).then(data=>{console.log('Motor stopped:',data);}).catch(e=>console.error('Error:',e));}function updateStatus(){fetch('/status').then(r=>r.json()).then(data=>{document.getElementById('lcdLine1').textContent=data.lcdLine1||'----';document.getElementById('lcdLine2').textContent=data.lcdLine2||'----';const stateEl=document.getElementById('machineState');stateEl.textContent=data.state||'UNKNOWN';stateEl.className='status-value '+(data.state==='LOCKED'?'locked':'unlocked');const motorEl=document.getElementById('motorStatus');motorEl.textContent=data.motorRunning?'RUNNING':'STOPPED';motorEl.className='status-value '+(data.motorRunning?'running':'stopped');document.getElementById('displayCode').textContent=data.displayCode||'----';document.getElementById('currentSpeed').textContent=data.motorSpeed||'0';}).catch(e=>console.error('Error fetching status:',e));}setInterval(updateStatus,1000);updateStatus();</script></body></html>";
+  server.send(200, "text/html", html);
+}
+
+void handleStatus() {
+  StaticJsonDocument<300> doc;
+  doc["lcdLine1"] = lcdLine1;
+  doc["lcdLine2"] = lcdLine2;
+  doc["state"] = (state == LOCKED) ? "LOCKED" : "UNLOCKED";
+  doc["motorRunning"] = motorRunning;
+  doc["displayCode"] = currentDisplayCode;
+  doc["motorSpeed"] = manualMotorSpeed;
+  doc["machineId"] = machine_id;
+  
+  String response;
+  serializeJson(doc, response);
+  server.send(200, "application/json", response);
+}
+
+void handleMotorStart() {
+  if (server.hasArg("speed")) {
+    manualMotorSpeed = server.arg("speed").toInt();
+    manualMotorSpeed = constrain(manualMotorSpeed, 0, 255);
+  }
+  
+  // Start motor manually
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+  analogWrite(ENA, manualMotorSpeed);
+  digitalWrite(LED_BUILTIN_PIN, HIGH); // Turn on LED when motor runs
+  motorRunning = true;
+  motorStartTime = millis();
+  motorRunDuration = 0; // Set to 0 for continuous run (until stopped)
+  manualMotorControl = true;
+  
+  Serial.printf("Manual motor start at speed %d\n", manualMotorSpeed);
+  
+  StaticJsonDocument<100> doc;
+  doc["status"] = "started";
+  doc["speed"] = manualMotorSpeed;
+  String response;
+  serializeJson(doc, response);
+  server.send(200, "application/json", response);
+}
+
+void handleMotorStop() {
+  motorStop();
+  motorRunning = false;
+  manualMotorControl = false;
+  
+  Serial.println("Manual motor stop");
+  
+  StaticJsonDocument<100> doc;
+  doc["status"] = "stopped";
+  String response;
+  serializeJson(doc, response);
+  server.send(200, "application/json", response);
 }
 
 
@@ -475,6 +563,10 @@ void setup() {
   pinMode(IN1, OUTPUT);
 
   pinMode(IN2, OUTPUT);
+  
+  // Built-in LED setup
+  pinMode(LED_BUILTIN_PIN, OUTPUT);
+  digitalWrite(LED_BUILTIN_PIN, LOW); // Start with LED off
 
   motorStop();
 
@@ -521,6 +613,18 @@ void setup() {
 
   webSocket.setReconnectInterval(5000);
 
+  
+  // Web server setup for local control interface
+  server.on("/", handleRoot);
+  server.on("/status", handleStatus);
+  server.on("/motor/start", HTTP_POST, handleMotorStart);
+  server.on("/motor/stop", HTTP_POST, handleMotorStop);
+  
+  server.begin();
+  Serial.println("Web server started");
+  Serial.print("Access control panel at: http://");
+  Serial.println(WiFi.localIP());
+
 }
 
 
@@ -530,6 +634,9 @@ void setup() {
 void loop() {
 
   webSocket.loop();
+  
+  // Handle web server requests
+  server.handleClient();
 
   unsigned long now = millis();
 
@@ -623,8 +730,8 @@ void loop() {
 
 
   // Motor control timing
-
-  if (motorRunning && (now - motorStartTime > motorRunDuration)) {
+  // Only auto-stop if not under manual control
+  if (motorRunning && !manualMotorControl && (now - motorStartTime > motorRunDuration)) {
 
     motorStop();
 

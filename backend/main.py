@@ -32,6 +32,7 @@ from config import (
     ADMIN_PASSWORD,
     DISPLAY_CODE_TTL_MINUTES,
     FRONTEND_URL,
+    PRICE_PER_UNIT_PAISA,
     RAZORPAY_KEY_ID,
     RAZORPAY_SECRET_KEY,
     RECEIVER_EMAIL,
@@ -682,7 +683,7 @@ async def lock_by_code(request: Request):
 async def trigger_dispense_validated(machine_id: str, request: Request):
     """Called by backend after payment verification to instruct machine to dispense.
     Validates the lock, client and access_code hash before changing machine state.
-    Body: { client_id, access_code, quantity, transaction_id, amount }
+    Body: { client_id, access_code, quantity, transaction_id }
     """
     if not db.pool:
         return JSONResponse(
@@ -697,12 +698,13 @@ async def trigger_dispense_validated(machine_id: str, request: Request):
     access_code = data.get("access_code")
     quantity = int(data.get("quantity", 1))
     transaction_id = data.get("transaction_id")
-    amount = data.get("amount")
 
     if not client_id or not access_code or not transaction_id:
         raise HTTPException(
             status_code=400, detail="client_id, access_code and transaction_id required"
         )
+
+    amount = quantity * PRICE_PER_UNIT_PAISA  # calculate server-side
 
     res = await db.trigger_dispense_db(
         machine_id, client_id, access_code, quantity, transaction_id, amount
@@ -834,13 +836,17 @@ async def create_order(request: Request):
         return JSONResponse({"error": "Razorpay not configured"}, status_code=500)
     try:
         data = await request.json()
-        amount = data.get("amount")
-        if not amount:
-            return JSONResponse({"error": "Amount required"}, status_code=400)
+        quantity = int(data.get("quantity", 1))
+        if quantity <= 0:
+            return JSONResponse({"error": "Quantity must be positive"}, status_code=400)
+
+        amount = quantity * PRICE_PER_UNIT_PAISA  # amount in paise
         order = razorpay_client.order.create(
             {"amount": amount, "currency": "INR", "payment_capture": 1}
         )
-        print("ORDER  ::",order)
+        print("ORDER  ::", order)
+        order["unit_price_paise"] = PRICE_PER_UNIT_PAISA
+        order["quantity"] = quantity
         return JSONResponse(order)
     except Exception as e:
         print(f"Error creating order: {e}")

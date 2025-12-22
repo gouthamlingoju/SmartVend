@@ -21,8 +21,11 @@ SENDER_EMAIL = os.getenv('SENDER_EMAIL')
 SENDER_PASSWORD = os.getenv('SENDER_PASSWORD')
 RECEIVER_EMAIL = os.getenv('RECEIVER_EMAIL')
 
-# Hardware Variables
-DISPLAY_CODE_TTL_MINUTES= os.getenv('DISPLAY_CODE_TTL_MINUTES')
+# Hardware / Business Variables
+DISPLAY_CODE_TTL_MINUTES = os.getenv('DISPLAY_CODE_TTL_MINUTES')
+
+# Pricing (paise)
+PRICE_PER_UNIT_PAISA = int(os.getenv('PRICE_PER_UNIT_PAISA', '100'))  # default ₹1.00
 
 FRONTEND_URL = os.getenv('FRONTEND_URL')
 # Optional Redis URL for cross-worker WebSocket coordination (e.g. redis://localhost:6379)
