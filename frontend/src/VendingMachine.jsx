@@ -4,7 +4,7 @@ import supabase from "./supabase"; // added import
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL;
 const PRICE_PER_UNIT = Number(import.meta.env.VITE_PRICE_PER_UNIT || 1); // INR
-const RAZORPAY_KEY_ID = "rzp_live_4WjBpr2oPoM84e";
+const RAZORPAY_KEY_ID = import.meta.env.VITE_RAZORPAY_KEY_ID;
 export default function VendingMachine({ machine, onBack }) {
   const [availablePads, setAvailablePads] = useState(machine.current_stock);
   const [selectedPads, setSelectedPads] = useState(1);
@@ -38,7 +38,7 @@ export default function VendingMachine({ machine, onBack }) {
   // persist clientId
   try {
     localStorage.setItem("sv_client_id", clientId);
-  } catch (e) {}
+  } catch (e) { }
 
   // countdown helper
   const getRemainingSeconds = (iso) => {
@@ -85,7 +85,7 @@ export default function VendingMachine({ machine, onBack }) {
 
       alert(
         "Machine locked for you until " +
-          new Date(data.expires_at).toLocaleTimeString(),
+        new Date(data.expires_at).toLocaleTimeString(),
       );
     } catch (err) {
       console.error("Lock error", err);
@@ -202,10 +202,10 @@ export default function VendingMachine({ machine, onBack }) {
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
-      console.log(response);
+      console.log("responseeee", response);
 
       const data = await response.json();
-      console.log("Data", response);
+      console.log("Data", data);
       const { id, amount, currency } = data;
       console.log(id, amount, currency);
       const options = {
@@ -214,7 +214,7 @@ export default function VendingMachine({ machine, onBack }) {
         currency: currency,
         name: "SmartVend",
         description: "Purchase",
-        id: id,
+        order_id: id,
         handler: async function (response) {
           const paymentData = {
             razorpay_payment_id: response.razorpay_payment_id,
@@ -232,6 +232,7 @@ export default function VendingMachine({ machine, onBack }) {
             );
             // console.log("paymentData",paymentData);
             const verificationData = await verifyResponse.json();
+            console.log("verificationData", verificationData);
             if (!verifyResponse.ok) {
               throw new Error(
                 verificationData.error || "Payment verification failed",
@@ -249,7 +250,6 @@ export default function VendingMachine({ machine, onBack }) {
                   quantity: selectedPads,
                   transaction_id: txId,
                   // amount calculated on server from quantity and env price
-                  quantity: selectedPads,
                 }),
               },
             );
@@ -597,7 +597,11 @@ export default function VendingMachine({ machine, onBack }) {
       {showFeedback && (
         <FeedbackForm
           machineId={machine.machine_id}
-          onClose={() => setShowFeedback(false)}
+          onClose={() => {
+            setShowFeedback(false);
+            // Reload page to fetch fresh machine state after transaction
+            window.location.reload();
+          }}
         />
       )}
       {isDispensing && (
