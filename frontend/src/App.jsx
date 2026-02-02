@@ -13,36 +13,35 @@ function AppRoutes() {
   const [machines, setMachines] = useState([]);
   const [loading, setLoading] = useState(true);
   const [adminAuth, setAdminAuth] = useState(false);
+  const navigate = useNavigate();
+
+  const fetchMachines = async () => {
+    const { data, error } = await supabase
+      .from('machines')
+      .select('*');
+    if (error) {
+      console.error('Error fetching machines:', error);
+      return;
+    }
+    setMachines(data.map(m => {
+      if (m.status === 'working' && m.current_stock <= 0) {
+        return { ...m, status: 'out_of_stock' };
+      }
+      return m;
+    }));
+  };
 
   useEffect(() => {
-    async function fetchMachines() {
-      const { data, error } = await supabase
-        .from('machines')
-        .select('*');
-      if (error) {
-        console.error('Error fetching machines:', error);
-        setLoading(false);
-        return;
-      }
-      setMachines(data.map(m => {
-        if (m.status === 'working' && m.current_stock <= 0) {
-          return { ...m, status: 'out_of_stock' };
-        }
-        return m;
-      }));
-      setLoading(false);
-    }
-    fetchMachines();
+    setLoading(true);
+    fetchMachines().finally(() => setLoading(false));
   }, []);
-
-  const navigate = useNavigate();
 
   if (loading) return <div className="flex justify-center items-center min-h-screen text-xl">Loading machines...</div>;
 
   return (
     <Routes>
       <Route path="/" element={<Welcome onUser={() => navigate('/machines')} onAdmin={() => navigate('/admin-login')} />} />
-      <Route path="/machines" element={<MachineList machines={machines} onSelect={machine => navigate(`/machine/${machine.machine_id}`)} />} />
+      <Route path="/machines" element={<MachineList machines={machines} onSelect={machine => navigate(`/machine/${machine.machine_id}`)} onRefresh={fetchMachines} />} />
       <Route path="/machine/:machineId" element={<VendingMachineWrapper machines={machines} />} />
       <Route path="/admin-login" element={<AdminLogin onSuccess={() => { setAdminAuth(true); navigate('/admin'); }} onBack={() => navigate('/')} />} />
       <Route path="/admin" element={adminAuth ? <AdminDashboard machines={machines} onLogout={() => { setAdminAuth(false); navigate('/'); }} /> : <AdminLogin onSuccess={() => { setAdminAuth(true); navigate('/admin'); }} onBack={() => navigate('/')} />} />

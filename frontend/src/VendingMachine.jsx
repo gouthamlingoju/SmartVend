@@ -101,6 +101,20 @@ export default function VendingMachine({ machine, onBack }) {
     };
   }, []);
 
+  // Cleanup: auto-unlock if user navigates away while locked (but not during transaction)
+  useEffect(() => {
+    return () => {
+      // Only unlock if locked and not in the middle of a transaction
+      if (locked && !showPopup && !isDispensing) {
+        fetch(`${BACKEND_URL}/api/machine/${machine.machine_id}/unlock`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ client_id: clientId }),
+        }).catch(err => console.error("Cleanup unlock failed:", err));
+      }
+    };
+  }, [locked, showPopup, isDispensing, machine.machine_id, clientId]);
+
   // Auto-dismiss success popup after a short delay and reset view
   useEffect(() => {
     if (!showPopup) return;
@@ -126,6 +140,13 @@ export default function VendingMachine({ machine, onBack }) {
         );
         if (!mounted || !res.ok) return;
         const s = await res.json();
+
+        // Check if machine is offline
+        if (s.status === 'offline' || s.status === 'Unavailable') {
+          setIsOffline(true);
+          return;
+        }
+
         if (s.locked && s.locked_by && s.locked_by === clientId) {
           setLocked(true);
           setLockedUntil(s.expires_at);
@@ -162,6 +183,46 @@ export default function VendingMachine({ machine, onBack }) {
       mounted = false;
     };
   }, []);
+
+  // Periodic status polling to detect if machine goes offline
+  useEffect(() => {
+    const pollInterval = setInterval(async () => {
+      try {
+        const res = await fetch(
+          `${BACKEND_URL}/api/machine/${machine.machine_id}/public-status?client_id=${encodeURIComponent(clientId)}`,
+        );
+        if (!res.ok) {
+          setIsOffline(true);
+          return;
+        }
+        const s = await res.json();
+
+        // Check if machine went offline
+        if (s.status === 'offline' || s.status === 'Unavailable') {
+          setIsOffline(true);
+        } else {
+          setIsOffline(false);
+        }
+      } catch (e) {
+        // Network error - consider machine offline
+        setIsOffline(true);
+      }
+    }, 10000); // Poll every 10 seconds
+
+    return () => clearInterval(pollInterval);
+  }, [machine.machine_id, clientId]);
+
+  // Handle offline state - show alert and redirect
+  useEffect(() => {
+    if (isOffline) {
+      alert('Machine is currently offline or unavailable. Redirecting to machines list...');
+      // Delay redirect to allow user to read the alert
+      const redirectTimer = setTimeout(() => {
+        onBack();
+      }, 2000);
+      return () => clearTimeout(redirectTimer);
+    }
+  }, [isOffline, onBack]);
 
   // helper to format seconds into mm:ss
   const formatSeconds = (s) => {
@@ -345,21 +406,51 @@ export default function VendingMachine({ machine, onBack }) {
             </button>
           </div>
         </div>
-        <div className="grid text-center gap-4 p-6 bg-gray-50">
-          <div className="p-3 bg-white rounded-lg shadow-sm border border-gray-100">
-            <p className="text-gray-500 text-sm">Machine ID</p>
-            <p className="font-bold text-gray-800 font-mono">
-              {machine.machine_id}
-            </p>{" "}
-            {/* use machine_id */}
-            <p className="text-gray-500 text-sm mt-1">
-              Location:{" "}
-              <span className="font-semibold text-purple-700">
-                {machine.location}
-              </span>
-            </p>
+        {/* Machine Info & Lock Status */}
+        <div className="bg-white rounded-xl shadow-lg p-6 border-b border-gray-200">
+          <div className="flex justify-between items-center mb-4">
+            <h2 className="text-2xl font-bold text-purple-800">
+              {machine.location}
+            </h2>
+            <span className="text-gray-500 text-sm">ID: {machine.machine_id}</span>
           </div>
-          <div className="p-3 bg-white rounded-lg shadow-sm border border-gray-100">
+
+          {/* Offline State */}
+          {isOffline && (
+            <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-4">
+              <div className="flex items-start">
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  className="h-6 w-6 text-red-600 mr-3 flex-shrink-0"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
+                  />
+                </svg>
+                <div>
+                  <h3 className="text-red-800 font-semibold mb-1">Machine Offline</h3>
+                  <p className="text-red-700 text-sm">
+                    This machine is currently offline or unavailable. Please try another machine or check back later.
+                  </p>
+                  <button
+                    onClick={onBack}
+                    className="mt-3 bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-md text-sm transition-colors duration-200"
+                  >
+                    Back to Machines
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Lock Status */}
+          <div className="space-y-3">
             {locked && (
               <>
                 <p className="text-green-600 text-sm">
@@ -403,7 +494,7 @@ export default function VendingMachine({ machine, onBack }) {
                         alert("Unlock failed");
                       }
                     }}
-                    className="bg-red-500 text-white px-3 py-1 rounded-md"
+                    className="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded-md transition-colors duration-200"
                   >
                     Unlock
                   </button>

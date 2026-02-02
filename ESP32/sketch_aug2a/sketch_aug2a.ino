@@ -414,7 +414,7 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
 
       Serial.println("Connected to server");
 
-      updateLCD("Connected", "Unlocked");
+      updateLCD("Connected", "Fetching code...");
 
       // Register this device with the server, then send status and fetch code
 
@@ -462,8 +462,8 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
 
           Serial.println("State changed: UNLOCKED");
 
-          updateLCD("Unlocked", ("Code: " + currentDisplayCode).c_str());
-
+          // Don't update LCD here - wait for display_code message
+          // The server sends display_code immediately after unlock
           fetchDisplayCode();
 
         }
@@ -530,9 +530,10 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
 
           Serial.printf("Display code received: %s\n", code);
 
+          // Always update LCD immediately when display code is received
           if (state == UNLOCKED) {
 
-            updateLCD("Unlocked", ("Code: " + currentDisplayCode).c_str());
+            updateLCD("SmartVend", ("Code: " + currentDisplayCode).c_str());
 
           }
 
@@ -674,7 +675,7 @@ void loop() {
                 updateLCD("Locked", "Waiting...");
               } else if (strcmp(type, "unlock") == 0) {
                 state = UNLOCKED;
-                updateLCD("Unlocked", ("Code: " + currentDisplayCode).c_str());
+                updateLCD("SmartVend", ("Code: " + currentDisplayCode).c_str());
                 fetchDisplayCode();
               } else if (strcmp(type, "command") == 0) {
                 const char* action = cmd["action"] | "";
@@ -721,7 +722,7 @@ void loop() {
 
       sendJSON("status", "unlocked");
 
-      updateLCD("Unlocked", ("Code: " + currentDisplayCode).c_str());
+      updateLCD("SmartVend", ("Code: " + currentDisplayCode).c_str());
 
     }
 
