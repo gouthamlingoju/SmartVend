@@ -380,7 +380,6 @@ export default function VendingMachine({ machine, onBack }) {
                             body: JSON.stringify({ client_id: clientId }),
                           },
                         );
-                        alert(res);
                         if (!res.ok) {
                           const e = await res
                             .json()
@@ -394,15 +393,11 @@ export default function VendingMachine({ machine, onBack }) {
                         setLockedUntil(null);
                         setAccessCodeInput("");
                         setLockedByOther(false);
-                        if (statusPollRef.current) {
-                          clearInterval(statusPollRef.current);
-                          statusPollRef.current = null;
-                        }
                         if (countdownRef.current) {
                           clearInterval(countdownRef.current);
                           countdownRef.current = null;
                         }
-                        alert("Unlocked ");
+                        alert("Unlocked successfully");
                       } catch (err) {
                         console.error(err);
                         alert("Unlock failed");
@@ -433,7 +428,7 @@ export default function VendingMachine({ machine, onBack }) {
                     value={accessCodeInput}
                     onChange={(e) => setAccessCodeInput(e.target.value)}
                     className="px-3 py-2 border rounded-md w-48"
-                    placeholder="XXXXXXX"
+                    placeholder="XXXXXX"
                   />
                   <button
                     onClick={handleLockCode}
