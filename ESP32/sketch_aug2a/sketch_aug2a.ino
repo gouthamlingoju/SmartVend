@@ -102,7 +102,7 @@ String lcdLine1 = "";
 String lcdLine2 = "";
 
 // Manual motor control variables
-int manualMotorSpeed = 200; // Default speed (0-255)
+int manualMotorSpeed = 255; // Default speed (0-255)
 bool manualMotorControl = false; // Flag to indicate manual control
 
 // networking clients
