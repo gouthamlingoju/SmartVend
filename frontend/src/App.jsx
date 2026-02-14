@@ -1,34 +1,39 @@
 
 
+// FIX: architecture_review.md — "Unify Frontend Data Access"
+// Replaced direct Supabase query with backend API call for machine listing.
 import React, { useEffect, useState } from 'react';
 import { BrowserRouter as Router, Routes, Route, useNavigate, useParams } from 'react-router-dom';
 import VendingMachine from './VendingMachine';
-import supabase from './supabase';
 import AdminDashboard from './components/AdminDashboard';
 import Welcome from './components/Welcome';
 import AdminLogin from './components/AdminLogin';
 import MachineList from './components/MachineList';
 
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL;
+
 function AppRoutes() {
   const [machines, setMachines] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [fetchError, setFetchError] = useState(null);
   const [adminAuth, setAdminAuth] = useState(false);
   const navigate = useNavigate();
 
   const fetchMachines = async () => {
-    const { data, error } = await supabase
-      .from('machines')
-      .select('*');
-    if (error) {
-      console.error('Error fetching machines:', error);
-      return;
-    }
-    setMachines(data.map(m => {
-      if (m.status === 'working' && m.current_stock <= 0) {
-        return { ...m, status: 'out_of_stock' };
+    try {
+      setFetchError(null);
+      const res = await fetch(`${BACKEND_URL}/api/machines`);
+      if (!res.ok) {
+        throw new Error(`Failed to fetch machines (HTTP ${res.status})`);
       }
-      return m;
-    }));
+      const data = await res.json();
+      // out_of_stock derivation now handled server-side
+      setMachines(Array.isArray(data) ? data : []);
+    } catch (err) {
+      console.error('Error fetching machines:', err);
+      setFetchError(err.message || 'Failed to load machines');
+      setMachines([]);
+    }
   };
 
   useEffect(() => {
@@ -37,6 +42,7 @@ function AppRoutes() {
   }, []);
 
   if (loading) return <div className="flex justify-center items-center min-h-screen text-xl">Loading machines...</div>;
+  if (fetchError) return <div className="flex flex-col justify-center items-center min-h-screen text-xl text-red-600"><p>{fetchError}</p><button className="mt-4 bg-purple-600 text-white px-4 py-2 rounded" onClick={() => { setLoading(true); fetchMachines().finally(() => setLoading(false)); }}>Retry</button></div>;
 
   return (
     <Routes>
@@ -67,3 +73,4 @@ export default function App() {
     </Router>
   );
 }
+

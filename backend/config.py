@@ -13,6 +13,8 @@ SUPABASE_KEY = os.getenv('SUPABASE_KEY')
 # Razorpay configuration
 RAZORPAY_KEY_ID= os.getenv('RAZORPAY_KEY_ID')
 RAZORPAY_SECRET_KEY= os.getenv('RAZORPAY_SECRET_KEY')
+# FIX: architecture_review.md — "Payment Reconciliation"
+RAZORPAY_WEBHOOK_SECRET = os.getenv('RAZORPAY_WEBHOOK_SECRET')
 ADMIN_PASSWORD=os.getenv('ADMIN_PASSWORD')
 # SMTP Configuration for Email Alerts
 SMTP_SERVER = os.getenv('SMTP_SERVER')

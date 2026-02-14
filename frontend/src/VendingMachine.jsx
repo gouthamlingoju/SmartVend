@@ -1,5 +1,8 @@
 import { useState, useEffect, useRef } from "react";
 import FeedbackForm from "./components/FeedbackForm";
+import LockSection from "./components/LockSection";
+import QuantitySelector from "./components/QuantitySelector";
+import SuccessPopup from "./components/SuccessPopup";
 import supabase from "./supabase"; // added import
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL;
@@ -252,6 +255,7 @@ export default function VendingMachine({ machine, onBack }) {
         // amount calculated on server from quantity and env price
         body: JSON.stringify({
           quantity: selectedPads,
+          machine_id: machine.machine_id, // FIX: architecture_review.md — "Stock Reservation" — enables server-side stock check
           metadata: {
             transaction_id: txId,
             client_id: clientId,
@@ -450,87 +454,22 @@ export default function VendingMachine({ machine, onBack }) {
           )}
 
           {/* Lock Status */}
-          <div className="space-y-3">
-            {locked && (
-              <>
-                <p className="text-green-600 text-sm">
-                  Locked — time left:{" "}
-                  <span className="font-mono ml-1">
-                    {formatSeconds(lockedRemaining)}
-                  </span>
-                </p>
-                <div className="mt-2">
-                  <button
-                    onClick={async () => {
-                      try {
-                        const res = await fetch(
-                          `${BACKEND_URL}/api/machine/${machine.machine_id}/unlock`,
-                          {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ client_id: clientId }),
-                          },
-                        );
-                        if (!res.ok) {
-                          const e = await res
-                            .json()
-                            .catch(() => ({ detail: "unlock failed" }));
-                          return alert(
-                            e.detail || e.message || "Unlock failed",
-                          );
-                        }
-                        const d = await res.json();
-                        setLocked(false);
-                        setLockedUntil(null);
-                        setAccessCodeInput("");
-                        setLockedByOther(false);
-                        if (countdownRef.current) {
-                          clearInterval(countdownRef.current);
-                          countdownRef.current = null;
-                        }
-                        alert("Unlocked successfully");
-                      } catch (err) {
-                        console.error(err);
-                        alert("Unlock failed");
-                      }
-                    }}
-                    className="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded-md transition-colors duration-200"
-                  >
-                    Unlock
-                  </button>
-                </div>
-              </>
-            )}
-            {!locked && lockedByOther && (
-              <p className="text-amber-600 text-sm">
-                This machine is locked by another user — time left:{" "}
-                <span className="font-mono ml-1">
-                  {formatSeconds(lockedRemaining)}
-                </span>
-              </p>
-            )}
-            {!locked && !lockedByOther && (
-              <>
-                <p className="text-gray-500 text-sm">
-                  Enter Code shown on machine
-                </p>
-                <div className="flex items-center justify-center mt-2 space-x-2">
-                  <input
-                    value={accessCodeInput}
-                    onChange={(e) => setAccessCodeInput(e.target.value)}
-                    className="px-3 py-2 border rounded-md w-48"
-                    placeholder="XXXXXX"
-                  />
-                  <button
-                    onClick={handleLockCode}
-                    className="bg-purple-600 text-white px-3 py-2 rounded-md"
-                  >
-                    Lock
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
+          <LockSection
+            machine={machine}
+            clientId={clientId}
+            locked={locked}
+            setLocked={setLocked}
+            lockedByOther={lockedByOther}
+            setLockedByOther={setLockedByOther}
+            lockedRemaining={lockedRemaining}
+            setLockedRemaining={setLockedRemaining}
+            formatSeconds={formatSeconds}
+            accessCodeInput={accessCodeInput}
+            setAccessCodeInput={setAccessCodeInput}
+            setLockedUntil={setLockedUntil}
+            handleLockCode={handleLockCode}
+            countdownRef={countdownRef}
+          />
         </div>
         <div className="p-6 border-b border-gray-200">
           <div className="flex justify-between items-center">
@@ -557,57 +496,12 @@ export default function VendingMachine({ machine, onBack }) {
             </div>
           )}
         </div>
-        <div className="p-6 border-b border-gray-200">
-          <p className="text-lg font-medium text-gray-700 mb-3">
-            Select Quantity:
-          </p>
-          <div className="flex items-center justify-between bg-gray-50 p-4 rounded-lg">
-            <button
-              className="w-10 h-10 flex items-center justify-center bg-white text-purple-600 rounded-full shadow-sm border border-gray-200 hover:bg-purple-50 transition-colors duration-200"
-              onClick={handleDecrement}
-              disabled={selectedPads <= 1}
-              aria-label="Decrease quantity"
-            >
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                className="h-5 w-5"
-                viewBox="0 0 20 20"
-                fill="currentColor"
-              >
-                <path
-                  fillRule="evenodd"
-                  d="M3 10a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z"
-                  clipRule="evenodd"
-                />
-              </svg>
-            </button>
-            <div className="flex flex-col items-center">
-              <p className="text-2xl font-bold text-gray-800">{selectedPads}</p>
-              <p className="text-sm text-gray-500">
-                pad{selectedPads > 1 ? "s" : ""} selected
-              </p>
-            </div>
-            <button
-              className="w-10 h-10 flex items-center justify-center bg-white text-purple-600 rounded-full shadow-sm border border-gray-200 hover:bg-purple-50 transition-colors duration-200"
-              onClick={handleIncrement}
-              disabled={selectedPads >= 5 || selectedPads >= availablePads}
-              aria-label="Increase quantity"
-            >
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                className="h-5 w-5"
-                viewBox="0 0 20 20"
-                fill="currentColor"
-              >
-                <path
-                  fillRule="evenodd"
-                  d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z"
-                  clipRule="evenodd"
-                />
-              </svg>
-            </button>
-          </div>
-        </div>
+        <QuantitySelector
+          selectedPads={selectedPads}
+          availablePads={availablePads}
+          onIncrement={handleIncrement}
+          onDecrement={handleDecrement}
+        />
         <div className="p-6">
           <div className="flex justify-between items-center mb-6">
             <p className="text-lg text-gray-600">Total Price:</p>
@@ -638,69 +532,26 @@ export default function VendingMachine({ machine, onBack }) {
           </div>
         </div>
       </div>
-      {showPopup && (
-        <div
-          className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-50 z-50"
-          aria-modal="true"
-          role="dialog"
-        >
-          <div className="bg-white p-6 rounded-lg shadow-xl max-w-sm w-full text-center">
-            <div className="w-16 h-16 mx-auto bg-green-100 rounded-full flex items-center justify-center mb-4">
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                className="h-10 w-10 text-green-600"
-                viewBox="0 0 20 20"
-                fill="currentColor"
-              >
-                <path
-                  fillRule="evenodd"
-                  d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
-                  clipRule="evenodd"
-                />
-              </svg>
-            </div>
-            <h2 className="text-xl font-bold text-gray-800 mb-2">
-              Payment Successful!
-            </h2>
-            <p className="text-gray-600 mb-6">
-              Please collect your {selectedPads} pad
-              {selectedPads > 1 ? "s" : ""} from the dispenser.
-            </p>
-            <button
-              className="bg-purple-600 hover:bg-purple-700 text-white px-6 py-3 rounded-md transition-colors duration-200 w-full"
-              onClick={() => {
-                setShowPopup(false);
-                setSelectedPads(1);
-                setDispensedPads(0);
-                setShowFeedback(true); // Re-enable automatic feedback prompt
-              }}
-            >
-              Done
-            </button>
-          </div>
-        </div>
-      )}
+      <SuccessPopup
+        showPopup={showPopup}
+        isDispensing={isDispensing}
+        selectedPads={selectedPads}
+        dispensedPads={dispensedPads}
+        onDone={() => {
+          setShowPopup(false);
+          setSelectedPads(1);
+          setDispensedPads(0);
+          setShowFeedback(true);
+        }}
+      />
       {showFeedback && (
         <FeedbackForm
           machineId={machine.machine_id}
           onClose={() => {
             setShowFeedback(false);
-            // Reload page to fetch fresh machine state after transaction
             window.location.reload();
           }}
         />
-      )}
-      {isDispensing && (
-        <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-50">
-          <div className="bg-white p-6 rounded-lg shadow-lg text-center">
-            <h2 className="text-xl font-bold text-yellow-600">
-              Dispensing Pads...
-            </h2>
-            <p className="text-gray-600">
-              {dispensedPads} / {selectedPads} Pad(s) dispensed
-            </p>
-          </div>
-        </div>
       )}
     </div>
   );

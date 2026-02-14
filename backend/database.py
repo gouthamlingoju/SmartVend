@@ -738,3 +738,49 @@ async def get_or_refresh_display_code(
         return {"display_code": display_code, "display_code_expires_at": expires_at}
     else:
         return {"display_code": m.get("display_code"), "display_code_expires_at": exp}
+
+
+# FIX: architecture_review.md — "Unify Frontend Data Access"
+# Added backend-side machine listing so frontend doesn't need direct Supabase access.
+async def get_all_machines():
+    """Return all machines from the database."""
+    if not supabase:
+        return []
+
+    def _query():
+        return supabase.table("machines").select("*").execute()
+
+    try:
+        res = await asyncio.to_thread(lambda: _retry_supabase_query(_query))
+        data = _res_data(res)
+        return data if isinstance(data, list) else []
+    except Exception as e:
+        print(f"Error fetching all machines: {e}")
+        return []
+
+
+# FIX: architecture_review.md — "Stock Reservation"
+# Check if enough stock is available before taking payment.
+async def check_stock_available(machine_id: str, quantity: int) -> bool:
+    """Return True if the machine has at least `quantity` items in stock."""
+    if not supabase:
+        return False
+
+    def _query():
+        return (
+            supabase.table("machines")
+            .select("current_stock")
+            .eq("machine_id", machine_id)
+            .single()
+            .execute()
+        )
+
+    try:
+        res = await asyncio.to_thread(lambda: _retry_supabase_query(_query))
+        data = _res_data(res)
+        if not data:
+            return False
+        return (data.get("current_stock") or 0) >= quantity
+    except Exception as e:
+        print(f"Error checking stock for {machine_id}: {e}")
+        return False

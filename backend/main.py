@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 import razorpay
 import redis.asyncio as aioredis
@@ -35,6 +35,7 @@ from config import (
     PRICE_PER_UNIT_PAISA,
     RAZORPAY_KEY_ID,
     RAZORPAY_SECRET_KEY,
+    RAZORPAY_WEBHOOK_SECRET,
     RECEIVER_EMAIL,
     REDIS_URL,
     SENDER_EMAIL,
@@ -42,10 +43,21 @@ from config import (
     SMTP_PORT,
     SMTP_SERVER,
 )
+from services import machine_service, payment_service
+
+# FIX: architecture_review.md — "Rate Limiting"
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 # Load environment variables
 
 pending_http_commands: Dict[str, List[Dict[str, Any]]] = {}
+
+# FIX: architecture_review.md — "Idempotency"
+# In-memory set of already-processed transaction IDs to prevent duplicate dispenses.
+# NOTE: For multi-worker deployments, replace with Redis SET or DB lookup.
+_processed_transactions: Set[str] = set()
 
 
 @asynccontextmanager
@@ -310,7 +322,9 @@ class CommandResponse(BaseModel):
 
 
 # ============ CORS ============
-origins = [FRONTEND_URL, "http://localhost:5173", "*"]
+# FIX: architecture_review.md — "CORS Scoping"
+# Removed wildcard "*" — only allow known frontend origins.
+origins = [FRONTEND_URL, "http://localhost:5174"]
 # filter out None / empty
 origins = [o for o in origins if o]
 app.add_middleware(
@@ -321,13 +335,41 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# FIX: architecture_review.md — "Rate Limiting"
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+
+@app.exception_handler(RateLimitExceeded)
+async def _rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    return JSONResponse(
+        {"error": "Too many requests. Please slow down."},
+        status_code=429,
+    )
+
 
 @app.get("/health")
 async def health_check():
     return {"status": "ok"}
 
 
+# FIX: architecture_review.md — "Unify Frontend Data Access"
+# New endpoint so the frontend fetches machines via backend, not direct Supabase.
+@app.get("/api/machines")
+async def list_machines():
+    """Return all machines. Public endpoint for the frontend machine-list view."""
+    if not db.pool:
+        raise HTTPException(status_code=500, detail="Database not configured")
+    machines = await db.get_all_machines()
+    # Apply out_of_stock derivation server-side (was previously done client-side)
+    for m in machines:
+        if m.get("status") == "working" and (m.get("current_stock") or 0) <= 0:
+            m["status"] = "out_of_stock"
+    return machines
+
+
+# FIX: architecture_review.md — "Rate Limiting"
 @app.post("/api/admin/login")
+@limiter.limit("5/minute")
 async def admin_login(request: Request):
     data = await request.json()
     password = data.get("password")
@@ -616,7 +658,9 @@ async def trigger_dispense(machine_id: str, request: Request):
     )
 
 
+# FIX: architecture_review.md — "Rate Limiting"
 @app.post("/api/lock-by-code")
+@limiter.limit("10/minute")
 async def lock_by_code(request: Request):
     """Frontend posts { client_id, code } to lock the machine atomically (in-memory simplified)
     This stores access_code_hash in locks and sets machine status to 'locked'.
@@ -703,6 +747,15 @@ async def trigger_dispense_validated(machine_id: str, request: Request):
         raise HTTPException(
             status_code=400, detail="client_id, access_code and transaction_id required"
         )
+
+    # FIX: architecture_review.md — "Idempotency"
+    # Reject duplicate dispense requests for the same transaction_id.
+    if transaction_id in _processed_transactions:
+        return JSONResponse(
+            {"error": "Transaction already processed", "status": "duplicate"},
+            status_code=409,
+        )
+    _processed_transactions.add(transaction_id)
 
     amount = quantity * PRICE_PER_UNIT_PAISA  # calculate server-side
 
@@ -840,6 +893,17 @@ async def create_order(request: Request):
         if quantity <= 0:
             return JSONResponse({"error": "Quantity must be positive"}, status_code=400)
 
+        # FIX: architecture_review.md — "Stock Reservation"
+        # Check stock availability before taking payment to prevent paying for unavailable items.
+        machine_id = data.get("machine_id")
+        if machine_id:
+            stock_ok = await db.check_stock_available(machine_id, quantity)
+            if not stock_ok:
+                return JSONResponse(
+                    {"error": "Insufficient stock for requested quantity"},
+                    status_code=409,
+                )
+
         amount = quantity * PRICE_PER_UNIT_PAISA  # amount in paise
         order = razorpay_client.order.create(
             {"amount": amount, "currency": "INR", "payment_capture": 1}
@@ -906,6 +970,50 @@ async def send_mail(request: Request):
     except Exception as e:
         print("Email error:", e)
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# FIX: architecture_review.md — "Payment Reconciliation"
+# Razorpay webhook for catching paid orders that the client failed to report.
+@app.post("/api/razorpay-webhook")
+async def razorpay_webhook(request: Request):
+    """Handle Razorpay webhook events for payment reconciliation.
+
+    When a payment is captured but the client never called /trigger-dispense
+    (e.g., tab closed, network failure), this webhook logs the event for
+    manual or automated reconciliation.
+    """
+    body = await request.body()
+    signature = request.headers.get("X-Razorpay-Signature", "")
+
+    if not RAZORPAY_WEBHOOK_SECRET:
+        print("WARNING: RAZORPAY_WEBHOOK_SECRET not configured, skipping webhook")
+        return JSONResponse({"status": "ignored"}, status_code=200)
+
+    # Verify signature
+    if not payment_service.verify_webhook_signature(body, signature, RAZORPAY_WEBHOOK_SECRET):
+        return JSONResponse({"error": "Invalid signature"}, status_code=400)
+
+    try:
+        event = json.loads(body)
+        event_type = event.get("event", "")
+
+        if event_type == "payment.captured":
+            payment_entity = event.get("payload", {}).get("payment", {}).get("entity", {})
+            order_id = payment_entity.get("order_id")
+            payment_id = payment_entity.get("id")
+            amount = payment_entity.get("amount")
+            print(
+                f"WEBHOOK: payment.captured — order={order_id} payment={payment_id} amount={amount}"
+            )
+            # TODO: Check if a transaction was already recorded for this order_id.
+            # If not, flag for manual reconciliation or auto-refund.
+        else:
+            print(f"WEBHOOK: Received event '{event_type}', no action taken.")
+
+        return JSONResponse({"status": "ok"})
+    except Exception as e:
+        print(f"WEBHOOK error: {e}")
+        return JSONResponse({"error": "Processing failed"}, status_code=500)
 
 
 # ============ Run Server ============
