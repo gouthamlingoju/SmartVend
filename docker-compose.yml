@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      # Inherit from .env file if present
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_KEY=${SUPABASE_KEY}
+      - RAZORPAY_KEY_ID=${RAZORPAY_KEY_ID}
+      - RAZORPAY_SECRET_KEY=${RAZORPAY_SECRET_KEY}
+      - RAZORPAY_WEBHOOK_SECRET=${RAZORPAY_WEBHOOK_SECRET}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      - DISPLAY_CODE_TTL_MINUTES=${DISPLAY_CODE_TTL_MINUTES}
+      - PRICE_PER_UNIT_PAISA=${PRICE_PER_UNIT_PAISA}
+      - FRONTEND_URL=http://localhost:5174
+    volumes:
+      - ./backend:/app
+    depends_on:
+      - redis
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "5174:5174"
+    environment:
+      - VITE_SUPABASE_URL=${SUPABASE_URL}
+      - VITE_SUPABASE_ANON_KEY=${SUPABASE_KEY}
+      - VITE_BACKEND_URL=http://localhost:8000
+    volumes:
+      - ./frontend:/app
+      # Map node_modules to a volume to avoid local conflicts
+      - /app/node_modules
+    depends_on:
+      - backend

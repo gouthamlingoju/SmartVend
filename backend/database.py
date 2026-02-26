@@ -312,6 +312,8 @@ async def confirm_dispense_db(machine_id: str, transaction_id: str, dispensed: i
 
     await asyncio.to_thread(lambda: _retry_supabase_query(_update_tx))
 
+    low_stock_triggered = False
+    remaining_stock = 0
     # decrement machine stock by dispensed quantity (non-negative)
     try:
 
@@ -330,7 +332,11 @@ async def confirm_dispense_db(machine_id: str, transaction_id: str, dispensed: i
         if mdata is not None and isinstance(mdata, dict):
             current = int(mdata.get("current_stock") or 0)
             new_stock = max(0, current - int(dispensed or 0))
+            remaining_stock = new_stock
             print("Newstockkk   ", new_stock)
+            
+            if current > 5 and new_stock <= 5:
+                low_stock_triggered = True
 
             def _update_stock():
                 # Update status to 'Unavailable' if stock reaches 0
@@ -375,7 +381,13 @@ async def confirm_dispense_db(machine_id: str, transaction_id: str, dispensed: i
         )
 
     await asyncio.to_thread(lambda: _retry_supabase_query(_update_machine))
-    return {"new_display_code": display_code}
+    
+    res_dict = {"new_display_code": display_code}
+    if low_stock_triggered:
+        res_dict["low_stock_triggered"] = True
+        res_dict["remaining_stock"] = remaining_stock
+        
+    return res_dict
 
 
 async def lock_by_code(client_id: str, code: str, ttl_minutes: int):

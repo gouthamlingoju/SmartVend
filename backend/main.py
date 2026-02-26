@@ -14,6 +14,7 @@ import razorpay
 import redis.asyncio as aioredis
 import uvicorn
 from fastapi import (
+    BackgroundTasks,
     Depends,
     FastAPI,
     Header,
@@ -22,6 +23,7 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
+from services.email_service import send_email_async
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, constr
@@ -370,7 +372,7 @@ async def list_machines():
 # FIX: architecture_review.md — "Rate Limiting"
 @app.post("/api/admin/login")
 @limiter.limit("5/minute")
-async def admin_login(request: Request):
+async def admin_login(request: Request, background_tasks: BackgroundTasks):
     data = await request.json()
     password = data.get("password")
     if not password:
@@ -380,6 +382,12 @@ async def admin_login(request: Request):
         raise HTTPException(status_code=401, detail="Invalid password")
 
     token = auth_handler.encode_token("admin")
+    
+    # Send login alert email in background
+    subject = "SmartVend Admin Login Alert"
+    body = f"An admin logged in at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}."
+    background_tasks.add_task(send_email_async, subject, body)
+
     return {"token": token}
 
 
@@ -576,7 +584,10 @@ async def unlock_by_client(machine_id: str, request: Request):
 
 @app.post("/api/machine/{machine_id}/confirm")
 async def confirm_dispense(
-    machine_id: str, request: Request, authorization: Optional[str] = Header(None)
+    machine_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    authorization: Optional[str] = Header(None),
 ):
     """ESP32 confirms dispensing success"""
     # verify API key
@@ -593,6 +604,13 @@ async def confirm_dispense(
         return JSONResponse(
             {"message": "confirm_failed", "error": res["error"]}, status_code=400
         )
+
+    if res.get("low_stock_triggered"):
+        subject = f"Low Stock Alert - {machine_id}"
+        remaining = res.get("remaining_stock", 0)
+        body = f"Machine {machine_id} stock just crossed the low-threshold.\nRemaining stock: {remaining}."
+        background_tasks.add_task(send_email_async, subject, body)
+        print(f"Low stock alert queued automatically for {machine_id} (remaining: {remaining})")
 
     # notify device to unlock
     try:
@@ -940,36 +958,19 @@ async def verify_payment(request: Request):
 
 
 @app.post("/low-stock-alert")
-async def send_mail(request: Request):
+async def send_mail(request: Request, background_tasks: BackgroundTasks):
     data = await request.json()
     machineID = data.get("machineID")
     remaining = data.get("Remaining")
 
-    sender = SENDER_EMAIL
-    password = SENDER_PASSWORD
-    receiver = RECEIVER_EMAIL
-    smtp_server = SMTP_SERVER
-    smtp_port = int(SMTP_PORT)
-
     subject = f"Low Stock Alert - {machineID}"
     body = f"Machine {machineID} is running low.\nRemaining pads: {remaining}"
-
-    msg = MIMEMultipart()
-    msg["From"] = sender
-    msg["To"] = receiver
-    msg["Subject"] = subject
-    msg.attach(MIMEText(body, "plain"))
-
-    try:
-        with smtplib.SMTP(smtp_server, smtp_port) as server:
-            server.starttls()
-            server.login(sender, password)
-            server.send_message(msg)
-        print(f"Low stock alert sent for {machineID}")
-        return {"message": "Email sent"}
-    except Exception as e:
-        print("Email error:", e)
-        return JSONResponse({"error": str(e)}, status_code=500)
+    
+    background_tasks.add_task(send_email_async, subject, body)
+    
+    # We log optimistically
+    print(f"Low stock alert queued for {machineID}")
+    return {"message": "Email queued"}
 
 
 # FIX: architecture_review.md — "Payment Reconciliation"
