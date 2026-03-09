@@ -6,7 +6,6 @@ import React, { useEffect, useState } from 'react';
 import { BrowserRouter as Router, Routes, Route, useNavigate, useParams } from 'react-router-dom';
 import VendingMachine from './VendingMachine';
 import AdminDashboard from './components/AdminDashboard';
-import Welcome from './components/Welcome';
 import AdminLogin from './components/AdminLogin';
 import MachineList from './components/MachineList';
 
@@ -46,8 +45,7 @@ function AppRoutes() {
 
   return (
     <Routes>
-      <Route path="/" element={<Welcome onUser={() => navigate('/machines')} onAdmin={() => navigate('/admin-login')} />} />
-      <Route path="/machines" element={<MachineList machines={machines} onSelect={machine => navigate(`/machine/${machine.machine_id}`)} onRefresh={fetchMachines} />} />
+      <Route path="/" element={<MachineList machines={machines} onSelect={machine => navigate(`/machine/${machine.machine_id}`)} onRefresh={fetchMachines} />} />
       <Route path="/machine/:machineId" element={<VendingMachineWrapper machines={machines} />} />
       <Route path="/admin-login" element={<AdminLogin onSuccess={() => { setAdminAuth(true); navigate('/admin'); }} onBack={() => navigate('/')} />} />
       <Route path="/admin" element={adminAuth ? <AdminDashboard machines={machines} onLogout={() => { setAdminAuth(false); navigate('/'); }} /> : <AdminLogin onSuccess={() => { setAdminAuth(true); navigate('/admin'); }} onBack={() => navigate('/')} />} />
@@ -63,7 +61,7 @@ function VendingMachineWrapper({ machines }) {
   if (!machine) {
     return <div className="min-h-screen flex items-center justify-center text-2xl">Machine not found</div>;
   }
-  return <VendingMachine machine={machine} onBack={() => navigate('/machines')} />;
+  return <VendingMachine machine={machine} onBack={() => navigate('/')} />;
 }
 
 export default function App() {

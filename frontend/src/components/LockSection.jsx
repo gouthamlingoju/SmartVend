@@ -19,6 +19,8 @@ export default function LockSection({
     setLockedUntil,
     handleLockCode,
     countdownRef,
+    userName,
+    setUserName,
 }) {
     const handleUnlock = async () => {
         try {
@@ -86,20 +88,28 @@ export default function LockSection({
 
     return (
         <div className="space-y-3">
-            <p className="text-gray-500 text-sm">Enter Code shown on machine</p>
-            <div className="flex items-center justify-center mt-2 space-x-2">
+            <p className="text-gray-500 text-sm">Enter your name and the code shown on machine</p>
+            <div className="flex flex-col items-center justify-center mt-2 space-y-2">
                 <input
-                    value={accessCodeInput}
-                    onChange={(e) => setAccessCodeInput(e.target.value)}
+                    value={userName}
+                    onChange={(e) => setUserName(e.target.value)}
                     className="px-3 py-2 border rounded-md w-48"
-                    placeholder="XXXXXX"
+                    placeholder="Your Name"
                 />
-                <button
-                    onClick={handleLockCode}
-                    className="bg-purple-600 text-white px-3 py-2 rounded-md"
-                >
-                    Lock
-                </button>
+                <div className="flex items-center space-x-2">
+                    <input
+                        value={accessCodeInput}
+                        onChange={(e) => setAccessCodeInput(e.target.value)}
+                        className="px-3 py-2 border rounded-md w-48"
+                        placeholder="XXXXXX"
+                    />
+                    <button
+                        onClick={handleLockCode}
+                        className="bg-purple-600 text-white px-3 py-2 rounded-md"
+                    >
+                        Lock
+                    </button>
+                </div>
             </div>
         </div>
     );

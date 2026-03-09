@@ -89,7 +89,7 @@ const unsigned long FETCH_INTERVAL = 300000; // 5 minutes
 const unsigned long LOCK_DURATION = 600000; // 10 minutes
 
 const unsigned long BASE_RUN_TIME =
-    2000; // 2 seconds per unit (adjust to your motor)
+    4000; // 2 seconds per unit (adjust to your motor)
 
 unsigned long lastPost = 0;
 unsigned long lastFetch = 0;
@@ -101,6 +101,7 @@ const unsigned long WIFI_CHECK_INTERVAL = 30000; // 30 seconds
 String currentDisplayCode = "----"; // default blank code
 String currentTransactionId = "";   // to hold transaction ID during dispense
 unsigned long dispenseQuantity = 0; // to hold quantity for confirmation
+String lockedByName = "";           // name of the user who locked the machine
 
 // LCD display lines for web interface
 String lcdLine1 = "";
@@ -505,13 +506,22 @@ void webSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
 
       lockStartTime = millis();
 
-      updateLCD("Locked");
+      // Extract user name from lock message if provided
+      if (doc.containsKey("locked_by_name")) {
+        lockedByName = doc["locked_by_name"].as<String>();
+      } else {
+        lockedByName = "User";
+      }
 
-      Serial.println("State changed: LOCKED");
+      String lockMsg = "By: " + lockedByName;
+      updateLCD(lockMsg.c_str());
+
+      Serial.println("State changed: LOCKED by " + lockedByName);
 
     } else if (strcmp(msgType, "unlock") == 0) {
 
       state = UNLOCKED;
+      lockedByName = "";
 
       Serial.println("State changed: UNLOCKED");
 
@@ -793,9 +803,10 @@ void loop() {
         motorStop();
         motorRunning = false;
         jamStartTime = 0;
-        state = UNLOCKED;
+        // Stay LOCKED — server lock timeout or manual unlock will handle it
+        // This prevents the machine from becoming available mid-transaction
         sendJSON("error", "motor_jam");
-        updateLCD("Motor Jam!", "Manual Fix Req");
+        updateLCD("Error! Contact");
         return;
       }
     } else {

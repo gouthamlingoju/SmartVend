@@ -326,7 +326,7 @@ class CommandResponse(BaseModel):
 # ============ CORS ============
 # FIX: architecture_review.md — "CORS Scoping"
 # Removed wildcard "*" — only allow known frontend origins.
-origins = [FRONTEND_URL, "http://localhost:5174"]
+origins = [FRONTEND_URL, "http://localhost:5173"]
 # filter out None / empty
 origins = [o for o in origins if o]
 app.add_middleware(
@@ -692,6 +692,7 @@ async def lock_by_code(request: Request):
     data = await request.json()
     client_id = data.get("client_id")
     code = data.get("code")
+    user_name = data.get("name", "User")  # display name for ESP32 LCD
     if not client_id or not code:
         raise HTTPException(status_code=400, detail="client_id and code required")
 
@@ -718,7 +719,7 @@ async def lock_by_code(request: Request):
     # notify device to lock for the duration
     try:
         machine_id = res.get("machine_id")
-        payload = {"type": "lock", "expires_at": res.get("expires_at")}
+        payload = {"type": "lock", "expires_at": res.get("expires_at"), "locked_by_name": user_name}
         if machine_id:
             pending_http_commands.setdefault(machine_id, []).append(payload)
         ws = connected_machines.get(machine_id)

@@ -3,7 +3,7 @@
 
 -- Create machines table
 CREATE TABLE IF NOT EXISTS machines (
-  id TEXT PRIMARY KEY,
+  machine_id TEXT PRIMARY KEY,
   name TEXT,
   location TEXT,
   api_key TEXT,
@@ -11,12 +11,13 @@ CREATE TABLE IF NOT EXISTS machines (
   status TEXT DEFAULT 'idle',
   display_code TEXT,
   display_code_expires_at TIMESTAMP WITH TIME ZONE,
-  last_seen_at TIMESTAMP WITH TIME ZONE
+  last_seen_at TIMESTAMP WITH TIME ZONE,
+  last_refill_at TIMESTAMP WITH TIME ZONE
 );
 
 -- Create locks table
 CREATE TABLE IF NOT EXISTS locks (
-  machine_id TEXT PRIMARY KEY REFERENCES machines(id) ON DELETE CASCADE,
+  machine_id TEXT PRIMARY KEY REFERENCES machines(machine_id) ON DELETE CASCADE,
   locked_by TEXT,
   access_code_hash TEXT,
   locked_at TIMESTAMP WITH TIME ZONE,
@@ -27,7 +28,7 @@ CREATE TABLE IF NOT EXISTS locks (
 -- Create transactions table
 CREATE TABLE IF NOT EXISTS transactions (
   id UUID PRIMARY KEY,
-  machine_id TEXT REFERENCES machines(id),
+  machine_id TEXT REFERENCES machines(machine_id),
   client_id TEXT,
   access_code TEXT,
   amount INTEGER,

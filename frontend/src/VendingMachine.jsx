@@ -3,7 +3,6 @@ import FeedbackForm from "./components/FeedbackForm";
 import LockSection from "./components/LockSection";
 import QuantitySelector from "./components/QuantitySelector";
 import SuccessPopup from "./components/SuccessPopup";
-import supabase from "./supabase"; // added import
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL;
 const PRICE_PER_UNIT = Number(import.meta.env.VITE_PRICE_PER_UNIT || 1); // INR
@@ -29,6 +28,9 @@ export default function VendingMachine({ machine, onBack }) {
   const [dispensedPads, setDispensedPads] = useState(0);
   const [showFeedback, setShowFeedback] = useState(false);
   const [isOffline, setIsOffline] = useState(false);
+  const [userName, setUserName] = useState(() => {
+    try { return localStorage.getItem("sv_user_name") || ""; } catch (e) { return ""; }
+  });
   const lockGraceRef = useRef(0);
   const countdownRef = useRef(null);
 
@@ -38,9 +40,10 @@ export default function VendingMachine({ machine, onBack }) {
     }
   };
 
-  // persist clientId
+  // persist clientId and userName
   try {
     localStorage.setItem("sv_client_id", clientId);
+    if (userName) localStorage.setItem("sv_user_name", userName);
   } catch (e) { }
 
   // countdown helper
@@ -53,20 +56,46 @@ export default function VendingMachine({ machine, onBack }) {
 
   async function handleLockCode() {
     if (!accessCodeInput) return alert("Enter code shown on the machine");
+    if (!userName.trim()) return alert("Please enter your name");
     try {
       const res = await fetch(`${BACKEND_URL}/api/lock-by-code`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ client_id: clientId, code: accessCodeInput }),
+        body: JSON.stringify({ client_id: clientId, code: accessCodeInput, name: userName.trim() }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: "Lock failed" }));
         return alert(err.detail || err.message || "Lock failed");
       }
       const data = await res.json();
+
+      // Show alert FIRST, then start countdown after user dismisses it
+      alert(
+        "Machine locked for you until " +
+        new Date(data.expires_at).toLocaleTimeString(),
+      );
+
+      // AFTER alert dismissed: fetch fresh server time for accurate countdown
+      let remaining = 0;
+      try {
+        const statusRes = await fetch(
+          `${BACKEND_URL}/api/machine/${machine.machine_id}/public-status?client_id=${encodeURIComponent(clientId)}`,
+        );
+        if (statusRes.ok) {
+          const s = await statusRes.json();
+          if (s.server_time && s.expires_at) {
+            const serverMs = Date.parse(s.server_time);
+            const expMs = Date.parse(s.expires_at);
+            remaining = Math.max(0, Math.floor((expMs - serverMs) / 1000));
+          }
+        }
+      } catch (e) {
+        // fallback to client-side calculation
+        remaining = getRemainingSeconds(data.expires_at);
+      }
+
       setLocked(true);
       setLockedUntil(data.expires_at);
-      const remaining = getRemainingSeconds(data.expires_at);
       setLockedRemaining(remaining);
 
       // avoid immediate unlock due to eventual consistency in status polling
@@ -85,11 +114,6 @@ export default function VendingMachine({ machine, onBack }) {
           return r - 1;
         });
       }, 1000);
-
-      alert(
-        "Machine locked for you until " +
-        new Date(data.expires_at).toLocaleTimeString(),
-      );
     } catch (err) {
       console.error("Lock error", err);
       alert("Lock failed");
@@ -176,6 +200,19 @@ export default function VendingMachine({ machine, onBack }) {
               Math.floor((expMs - serverMs) / 1000),
             );
             setLockedRemaining(remaining);
+            // Start a countdown interval for lockedByOther
+            if (countdownRef.current) clearInterval(countdownRef.current);
+            countdownRef.current = setInterval(() => {
+              setLockedRemaining((r) => {
+                if (r <= 1) {
+                  clearInterval(countdownRef.current);
+                  countdownRef.current = null;
+                  setLockedByOther(false); // auto-clear when expired
+                  return 0;
+                }
+                return r - 1;
+              });
+            }, 1000);
           }
         }
       } catch (e) {
@@ -469,6 +506,8 @@ export default function VendingMachine({ machine, onBack }) {
             setLockedUntil={setLockedUntil}
             handleLockCode={handleLockCode}
             countdownRef={countdownRef}
+            userName={userName}
+            setUserName={setUserName}
           />
         </div>
         <div className="p-6 border-b border-gray-200">
