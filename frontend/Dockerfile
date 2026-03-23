@@ -1,21 +1,31 @@
-# Use an official Node.js runtime as a parent image
-FROM node:20-alpine
+# Build stage
+FROM node:20-alpine AS build
 
-# Set the working directory in the container
 WORKDIR /app
 
-# Copy package.json and package-lock.json (if available)
 COPY package*.json ./
+RUN npm ci
 
-# Install dependencies
-RUN npm install
-
-# Copy the rest of the application code
 COPY . .
 
-# Expose the port the app runs on
-EXPOSE 5174
+# Build args for Vite env vars (set in Render dashboard)
+ARG VITE_BACKEND_URL
+ARG VITE_RAZORPAY_KEY_ID
+ARG VITE_SUPABASE_URL
+ARG VITE_SUPABASE_ANON_KEY
+ARG VITE_PRICE_PER_UNIT=1
 
-# Command to run the application in development mode
-# Using --host 0.0.0.0 to allow access from outside the container
-CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
+RUN npm run build
+
+# Production stage — serve static files
+FROM node:20-alpine
+
+WORKDIR /app
+
+RUN npm install -g serve
+
+COPY --from=build /app/dist ./dist
+
+EXPOSE 10000
+
+CMD ["serve", "-s", "dist", "-l", "10000"]
