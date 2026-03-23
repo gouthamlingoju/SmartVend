@@ -5,6 +5,7 @@
 import React, { useEffect, useState } from 'react';
 import { BrowserRouter as Router, Routes, Route, useNavigate, useParams } from 'react-router-dom';
 import VendingMachine from './VendingMachine';
+import VendingSession from './VendingSession';
 import AdminDashboard from './components/AdminDashboard';
 import AdminLogin from './components/AdminLogin';
 import MachineList from './components/MachineList';
@@ -47,6 +48,8 @@ function AppRoutes() {
     <Routes>
       <Route path="/" element={<MachineList machines={machines} onSelect={machine => navigate(`/machine/${machine.machine_id}`)} onRefresh={fetchMachines} />} />
       <Route path="/machine/:machineId" element={<VendingMachineWrapper machines={machines} />} />
+      {/* v3.0: QR scan entry point — /vend/:machineId/:sessionToken */}
+      <Route path="/vend/:machineId/:sessionToken" element={<VendingSession />} />
       <Route path="/admin-login" element={<AdminLogin onSuccess={() => { setAdminAuth(true); navigate('/admin'); }} onBack={() => navigate('/')} />} />
       <Route path="/admin" element={adminAuth ? <AdminDashboard machines={machines} onLogout={() => { setAdminAuth(false); navigate('/'); }} /> : <AdminLogin onSuccess={() => { setAdminAuth(true); navigate('/admin'); }} onBack={() => navigate('/')} />} />
       <Route path="*" element={<div className="min-h-screen flex items-center justify-center text-2xl">404 Not Found</div>} />

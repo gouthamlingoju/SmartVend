@@ -26,6 +26,11 @@ RECEIVER_EMAIL = os.getenv('RECEIVER_EMAIL')
 # Hardware / Business Variables
 DISPLAY_CODE_TTL_MINUTES = os.getenv('DISPLAY_CODE_TTL_MINUTES')
 
+# v3.0 Session Configuration
+SESSION_TTL_SECONDS = int(os.getenv('SESSION_TTL_SECONDS', '60'))     # QR rotation interval
+CLAIM_TTL_SECONDS = int(os.getenv('CLAIM_TTL_SECONDS', '300'))       # 5 min payment window
+MOTOR_TIMEOUT_SECONDS = int(os.getenv('MOTOR_TIMEOUT_SECONDS', '120'))  # 2 min motor max
+
 # Pricing (paise)
 PRICE_PER_UNIT_PAISA = int(os.getenv('PRICE_PER_UNIT_PAISA', '100'))  # default ₹1.00
 

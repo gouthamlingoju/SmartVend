@@ -1,215 +1,335 @@
-SmartVend
-=========
+# SmartVend
 
-Connected vending machine platform with:
-- FastAPI backend (WebSocket + REST, Supabase/Postgres data store)
-- React (Vite) frontend for users and admins
-- ESP32 firmware for the dispenser (WebSocket control + HTTP confirmations)
+Connected vending machine platform with QR code-based session management.
 
+- **Backend**: FastAPI (WebSocket + REST, Supabase/Postgres, Redis)
+- **Frontend**: React (Vite + Tailwind) for users and admins
+- **Device**: ESP32 with OLED display for QR code generation and motor control
+
+---
 
 ## Architecture
 
-- Backend: `backend/` FastAPI app exposing REST and a `/ws` WebSocket for ESP32s. Stores state in Supabase/Postgres. Optional Redis for cross‑worker WS fanout.
-- Frontend: `frontend/` React (Vite) app with Supabase client for listing machines and an admin dashboard.
-- Device: `ESP32/sketch_aug2a/sketch_aug2a.ino` connects to backend via WebSocket and receives commands.
+```text
+┌─────────────┐         ┌────────────────┐         ┌──────────────────┐
+│  ESP32 +    │◄──WS──►│  FastAPI        │◄──API──►│  React Frontend  │
+│  OLED       │         │  Backend       │         │  (Vite)          │
+│  (QR Code)  │──HTTP──►│                │         │                  │
+└─────────────┘         │  Supabase DB   │         │  Razorpay SDK    │
+                        │  Redis Pub/Sub │         └──────────────────┘
+                        │  Razorpay API  │
+                        └────────────────┘
+```
 
-Repo layout
-- backend: API, DB access, WebSocket server
-- frontend: React UI (user flow + admin)
-- ESP32: Arduino sketch for hardware
-- migrations: example SQL for DB schema (see notes below)
+### How It Works (v3.0 — QR Flow)
 
+1. **ESP32 boots** → connects WiFi → WebSocket → registers with backend
+2. **Backend creates session** → sends session URL to ESP32
+3. **ESP32 generates QR code** on OLED display (128×64 px)
+4. **User scans QR** with phone camera → browser opens session URL
+5. **Frontend auto-claims session** → user selects quantity → pays via Razorpay
+6. **Backend triggers dispense** → ESP32 runs motor → confirms → new QR appears
+
+### Repo Layout
+
+| Directory | Contents |
+|---|---|
+| `backend/` | FastAPI app: REST + WebSocket, session management, Razorpay |
+| `frontend/` | React UI: user vending flow + admin dashboard |
+| `ESP32/` | Arduino sketch for hardware (OLED + motor + QR) |
+
+---
 
 ## Backend (FastAPI)
 
-Main entry: `backend/main.py`
+**Entry point**: `backend/main.py`
 
-Features
-- JWT admin login (`/api/admin/login`, 1‑hour tokens)
-- Machine lifecycle: register, status, lock/unlock, trigger dispense
-- Display code rotation with TTL
-- WebSocket device connections at `/ws`
-- Optional Redis pub/sub for multi‑process WS delivery
-- Razorpay order creation and verification hooks
-- Low‑stock email alert endpoint
+### Key Features
 
-Key environment variables (read in `backend/config.py`)
-- SUPABASE_URL, SUPABASE_KEY
-- RAZORPAY_KEY_ID, RAZORPAY_SECRET_KEY
-- ADMIN_PASSWORD
-- SMTP_SERVER, SMTP_PORT, SENDER_EMAIL, SENDER_PASSWORD, RECEIVER_EMAIL
-- DISPLAY_CODE_TTL_MINUTES (used for display code TTL and lock TTL)
-- FRONTEND_URL (CORS allow‑origin)
-- REDIS_URL (optional, e.g. redis://localhost:6379)
+- **Session management** — create, claim, cancel, dispense, expire sessions
+- **Atomic operations** — stock reservation, session claiming (race-safe)
+- **WebSocket** — real-time ESP32 communication at `/ws`
+- **Redis pub/sub** — cross-worker WebSocket fanout
+- **Razorpay** — order creation, signature verification, webhook reconciliation
+- **JWT admin auth** — 1-hour tokens, stock management, dashboard
+- **Audit logging** — all state changes logged to events table
 
-Example .env
-```
-SUPABASE_URL=... 
-SUPABASE_KEY=...
+### Environment Variables (`backend/.env`)
+
+```env
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_KEY=your-service-role-key
 FRONTEND_URL=http://localhost:5173
 ADMIN_PASSWORD=change-me
-DISPLAY_CODE_TTL_MINUTES=10
-RAZORPAY_KEY_ID=...
-RAZORPAY_SECRET_KEY=...
+RAZORPAY_KEY_ID=rzp_test_xxx
+RAZORPAY_SECRET_KEY=xxx
+RAZORPAY_WEBHOOK_SECRET=xxx
 SMTP_SERVER=smtp.gmail.com
 SMTP_PORT=587
 SENDER_EMAIL=you@example.com
 SENDER_PASSWORD=app-password
 RECEIVER_EMAIL=ops@example.com
-# Optional
-# REDIS_URL=redis://localhost:6379
+REDIS_URL=redis://localhost:6379
+# Session Config (optional, has defaults)
+SESSION_TTL_SECONDS=60
+CLAIM_TTL_SECONDS=300
+MOTOR_TIMEOUT_SECONDS=120
 ```
 
-Run (Windows PowerShell)
-```
-# from backend/
+### Run
+
+```bash
+cd backend
 python -m venv venv
-./venv/Scripts/Activate.ps1
-pip install fastapi uvicorn[standard] python-dotenv supabase razorpay redis email-validator
-python main.py
+source venv/bin/activate  # or ./venv/Scripts/Activate.ps1 on Windows
+pip install -r requirements.txt
+uvicorn main:app --reload
 ```
-The server listens on http://0.0.0.0:8002 and exposes WebSocket at ws://localhost:8002/ws.
 
-REST endpoints (summary)
-- POST /api/admin/login
-- GET  /api/admin/verify
-- POST /api/machine/register
-- GET  /api/machine/{machine_id}/status    (ESP32, requires Authorization: Bearer <api_key>)
-- GET  /api/machine/{machine_id}/public-status?client_id=...  (frontend)
-- POST /api/machine/{machine_id}/unlock    (frontend, client_id body)
-- POST /api/machine/{machine_id}/confirm   (ESP32)
-- POST /api/machine/{machine_id}/report-error
-- POST /api/machine/{machine_id}/trigger-dispense  (frontend → server validated)
-- POST /api/machine/{machine_id}/update-stock      (admin, JWT)
-- POST /api/lock-by-code            (frontend)
-- POST /create-order                (Razorpay)
-- POST /verify-payment              (Razorpay)
-- POST /low-stock-alert             (email)
+Server: `http://localhost:8000` • WebSocket: `ws://localhost:8000/ws`
 
-WebSocket `/ws` (ESP32)
-- Client → Server messages
-	- `{ "type":"register", "machine_id":"M001", "api_key":"..." }`
-	- `{ "type":"status", "value":"active|locked|unlocked" }`
-	- `{ "type":"fetch_display" }`
-- Server → Client messages
-	- `{ "type":"display_code", "value":"123456" }`
-	- `{ "type":"command", "action":"dispense", "duration": <quantity> }`
-	- `{ "type":"stock_update", "stock": <int> }`
+### REST Endpoints
 
-Note: Current backend does not emit explicit `lock`/`unlock` messages when a user locks via code. See “Known gaps” below.
+#### Session Management (v3.0)
 
+| Method | Endpoint | Caller | Purpose |
+|---|---|---|---|
+| `POST` | `/api/session/claim` | Frontend | Claim session after QR scan |
+| `GET` | `/api/session/status` | Frontend | Check session state (resume on reload) |
+| `POST` | `/api/session/cancel` | Frontend | Cancel session, release stock |
+| `POST` | `/api/session/trigger-dispense` | Frontend | Trigger dispense after payment |
 
-## Database (Supabase/Postgres)
+#### Machine & Payment
 
-The backend code expects the following columns:
-- machines: machine_id (text, unique), api_key, current_stock, status, display_code, display_code_expires_at, last_seen_at
-- locks: machine_id (text, PK), locked_by, access_code_hash, locked_at, expires_at, status
-- transactions: id (uuid, PK), machine_id, client_id, access_code, amount, quantity, payment_status, created_at, completed_at, dispensed
+| Method | Endpoint | Caller | Purpose |
+|---|---|---|---|
+| `POST` | `/api/machine/register` | ESP32 | Machine registration |
+| `POST` | `/api/machine/{id}/confirm` | ESP32 | Dispense confirmation |
+| `POST` | `/api/machine/{id}/update-stock` | Admin | Stock update (JWT) |
+| `POST` | `/api/machine/{id}/report-error` | ESP32 | Error reporting |
+| `GET` | `/api/machines` | Frontend | List all machines |
+| `POST` | `/create-order` | Frontend | Razorpay order creation |
+| `POST` | `/verify-payment` | Frontend | Razorpay signature verification |
+| `POST` | `/api/razorpay-webhook` | Razorpay | Webhook reconciliation |
+| `GET` | `/health` | Any | Health check (returns `{ status: "ok", version: "3.0" }`) |
 
-The example SQL in `migrations/001_create_tables.sql` uses `id` as the primary key for machines, while the code queries by `machine_id`. Align your schema one of these ways:
-1) Add a `machine_id` column and mark it unique, and update foreign keys to reference it; or
-2) Change the code to consistently use `id` (not recommended unless you refactor all queries).
+#### Admin
 
-Locks and codes
-- Lock TTL and display code TTL reuse `DISPLAY_CODE_TTL_MINUTES`.
-- On successful dispense confirmation, the lock is cleared, stock decremented, and a new display code is rotated.
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `POST` | `/api/admin/login` | Admin login (returns JWT) |
+| `GET` | `/api/admin/verify` | Verify admin token |
 
+#### Deprecated (return 410 Gone)
 
-## Frontend (React + Vite)
+| Endpoint | Replacement |
+|---|---|
+| `POST /api/lock-by-code` | `POST /api/session/claim` |
+| `POST /api/machine/{id}/unlock` | `POST /api/session/cancel` / session expiry |
+| `POST /api/machine/{id}/dispense` | `POST /api/session/trigger-dispense` |
+| `POST /api/machine/{id}/trigger-dispense` | `POST /api/session/trigger-dispense` |
 
-Location: `frontend/`
+### WebSocket Protocol (`/ws`)
 
-Environment variables
-- VITE_BACKEND_URL (e.g. http://localhost:8002)
-- VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY
+#### ESP32 → Server
 
-Run (PowerShell)
+| Message | When |
+|---|---|
+| `{ "type":"register", "machine_id":"M001", "api_key":"..." }` | On connect |
+| `{ "type":"pong" }` | Response to server ping |
+| `{ "type":"status", "value":"timeout" }` | Local IN_USE timeout |
+| `{ "type":"error", "value":"motor_jam" }` | Hardware error |
+
+#### Server → ESP32
+
+| Message | When |
+|---|---|
+| `{ "type":"session", "token":"xK9mBq2P", "url":"..." }` | After register / QR rotation |
+| `{ "type":"claimed", "claimed_by_name":"Goutham" }` | User scans QR |
+| `{ "type":"new_session", "token":"pR7nWm4K", "url":"..." }` | After completion / expiry |
+| `{ "type":"command", "action":"dispense", "duration":2, "transaction_id":"..." }` | Payment confirmed |
+| `{ "type":"ping" }` | Keep-alive |
+| `{ "type":"stock_update", "stock":15 }` | Admin refill |
+
+---
+
+## Database (Supabase / Postgres)
+
+### Tables
+
+| Table | Purpose |
+|---|---|
+| `machines` | Machine registry (id, stock, status, api_key) |
+| `sessions` | Session lifecycle (token, status, claimed_by, expires_at) — replaces `locks` + `display_code` |
+| `orders` | Maps Razorpay `order_id` → `session_id` for webhook reconciliation |
+| `transactions` | Payment records (amount, quantity, dispensed) |
+| `events` | Audit log (event_type, session_id, payload) |
+| `feedback` | User feedback (rating, comment) |
+| `locks` | ⚠️ Legacy — kept for backward compat, no longer used |
+
+### Key Schema Features
+
+- **Partial unique index** on `sessions(machine_id)` WHERE status IN ('active', 'in_progress', 'dispensing') — enforces 1 active session per machine
+- **Sweeper index** on `sessions(expires_at)` WHERE status IN ('active', 'in_progress') — efficient expiry queries
+- **Machine status** values: `idle`, `in_use`, `dispensing`, `error`, `offline`, `Unavailable`
+
+---
+
+## Frontend (React + Vite + Tailwind)
+
+**Location**: `frontend/`
+
+### Environment Variables (`frontend/.env`)
+
+```env
+VITE_BACKEND_URL=http://localhost:8000
+VITE_RAZORPAY_KEY_ID=rzp_test_xxx
+VITE_SUPABASE_URL=https://your-project.supabase.co
+VITE_SUPABASE_ANON_KEY=your-anon-key
+VITE_PRICE_PER_UNIT=1
 ```
-# from frontend/
+
+### Run
+
+```bash
+cd frontend
 npm install
 npm run dev
 ```
-Open http://localhost:5173.
 
-User flow
-- Enter the code shown on the device to “lock” a machine (`POST /api/lock-by-code`)
-- Pay via Razorpay -> server verifies -> triggers dispense (`POST /api/machine/{id}/trigger-dispense`)
-- UI shows progress and optional feedback form
+Open http://localhost:5173
 
-Admin
-- Login `/api/admin/login` (JWT)
-- Update stock per machine `/api/machine/{id}/update-stock`
+### Routes
 
+| Route | Component | Purpose |
+|---|---|---|
+| `/` | `MachineList` | Browse available machines |
+| `/machine/:machineId` | `VendingMachine` | Legacy code-entry flow (still works) |
+| `/vend/:machineId/:sessionToken` | `VendingSession` | **v3.0 QR scan entry point** |
+| `/admin` | `AdminDashboard` | Stock management, machine monitoring |
+| `/admin-login` | `AdminLogin` | Admin authentication |
+
+### v3.0 User Flow (QR Scan)
+
+1. User scans QR → browser opens `/vend/M001/xK9mBq2P`
+2. First-time → enter name; returning → auto-claim with saved name
+3. Select quantity → Pay via Razorpay → Dispense animation
+4. Success popup → Feedback form → Redirect home
+5. Page reload → auto-resumes from current phase
+
+---
 
 ## ESP32 Firmware
 
-File: `ESP32/sketch_aug2a/sketch_aug2a.ino`
+**File**: `ESP32/sketch_aug2a/sketch_aug2a.ino`
 
-What to configure
-- `ssid`, `password`
-- `serverHost`, `serverPort`, `serverPath` (should match backend: ws://<host>:8002/ws)
-- `serverHttps` (HTTP base for REST calls, e.g. http://<host>:8002)
-- `machine_id`, `machine_api_key`
+### Hardware
 
-Build and upload
-1) Install libraries: WiFi, WebSocketsClient, ArduinoJson, LiquidCrystal_I2C
-2) Select your ESP32 board; compile and upload the sketch
+| Component | Purpose |
+|---|---|
+| ESP32 DevKit V1 | Main controller |
+| 0.96" OLED SSD1306 (128×64px) | QR code + status display |
+| L298N Motor Driver | Motor control |
+| Current Sensor (GPIO 34) | Jam detection |
 
-Behavior
-- Connects to Wi‑Fi -> WebSocket -> registers with server
-- Periodically sends status while unlocked and fetches display code every 5 minutes
-- Receives `{type:"command", action:"dispense"}` and runs the motor, then confirms over HTTP `/confirm`
+### Required Libraries (Arduino IDE)
 
-Important: The current sketch listens for `lock`/`unlock` messages to change state locally, but the backend does not emit these today. Device state (LOCKED/UNLOCKED) is not authoritative for frontend locking; the database `locks` table is.
+| Library | Purpose |
+|---|---|
+| **Adafruit SSD1306** + **Adafruit GFX** | OLED driver |
+| **QRCode** (by ricmoo) | QR bitmap generation |
+| **WebSocketsClient** | WebSocket over TLS |
+| **ArduinoJson** | JSON parsing |
 
+### Configuration
+
+```cpp
+const char *serverHost      = "smartvend.onrender.com";
+const char *machine_id      = "M001";
+const char *machine_api_key = "sv_001mmsg";
+```
+
+### Device States
+
+```text
+BOOTING → IDLE → IN_USE → DISPENSING → COMPLETED → IDLE
+                                          |
+                                        ERROR → IDLE (auto-recovery 60s)
+```
+
+### OLED Displays
+
+| State | Display |
+|---|---|
+| IDLE | "SmartVend" header + QR code + "Scan Me" |
+| IN_USE | "SmartVend" + "IN USE" + user name |
+| DISPENSING | "SmartVend" + "Dispensing..." + progress bar |
+| COMPLETED | "SmartVend" + "Done!" + checkmark |
+| ERROR | "SmartVend" + "ERROR!" + message |
+| OFFLINE | "SmartVend" + "Offline" + "Reconnecting..." |
+
+### Safety Features
+
+- Hardware Watchdog (10s timeout)
+- Motor Jam Detection (current sensing, GPIO 34)
+- Multi-WiFi auto-scan (best RSSI)
+- HTTP fallback command polling
+- Local IN_USE timeout (10 min failsafe)
+
+---
+
+## Quick Test Checklist
+
+### Backend
+```bash
+# Start the server
+cd backend && uvicorn main:app --reload
+
+# Health check
+curl http://localhost:8000/health
+# → {"status":"ok","version":"3.0"}
+
+# List machines
+curl http://localhost:8000/api/machines
+```
+
+### Frontend
+```bash
+cd frontend && npm run dev
+# Open http://localhost:5173
+
+# Test QR flow (with a valid session token):
+# Open http://localhost:5173/vend/M001/{valid_session_token}
+```
+
+### ESP32
+- Serial Monitor: WiFi connected → WS connected → register → session token → QR rendered
+- OLED: Shows "SmartVend" header + QR code
+
+---
 
 ## Troubleshooting
 
-“Lock falls back to unlocked quickly” (frontend)
-- Ensure DISPLAY_CODE_TTL_MINUTES isn’t set too low (e.g., 0 or 1). The lock TTL uses the same value.
-- Make sure the same `client_id` is used across requests. The UI stores it in `localStorage` as `sv_client_id`.
-- There’s no continuous polling of public status in `VendingMachine.jsx`. If you added one, leave a 3–5s “grace” after locking (there is a `lockGraceRef` hook for this) to avoid reading a stale unlocked state from eventual consistency.
-- Schema alignment: If your DB uses `id` for machines while the code expects `machine_id`, status/lock reads can fail silently and appear unlocked. Align schema (see Database section).
+**QR Code Expired quickly?**
+- `SESSION_TTL_SECONDS` controls QR rotation (default 60s). This is by design — short TTL = more secure.
 
-WebSocket connectivity
-- Device must use `webSocket.begin(serverHost, 8002, "/ws")` (plain WS) if backend runs locally without TLS. Don’t use `beginSSL` unless you terminate TLS (wss://).
-- Backend emits `display_code` and `command` messages; it does NOT notify `lock`/`unlock` yet.
+**Session claim returns 409?**
+- Someone already scanned this QR. Wait for a new QR on the machine.
 
-CORS and FRONTEND_URL
-- Set `FRONTEND_URL=http://localhost:5173` (or your deployed URL) so the backend allows the browser to call it.
+**CORS errors?**
+- Set `FRONTEND_URL` in backend `.env` to match your frontend URL.
 
-Razorpay warnings
-- `pkg_resources` is deprecated in recent Setuptools; it’s only a warning. Doesn’t affect WS or locks.
+**ESP32 shows "Offline"?**
+- Backend may be cold-starting (Render free tier). ESP32 auto-retries.
 
+**Razorpay `pkg_resources` warning?**
+- Cosmetic only. Does not affect functionality.
 
-## Known gaps (short‑term roadmap)
+**WebSocket won't connect?**
+- Use `beginSSL()` for production (wss://). Use `begin()` for local (ws://).
 
-- Emit WS notifications on lock/unlock so devices can reflect user lock state:
-	- on `/api/lock-by-code` success → publish `{type:"lock"}` to the machine’s WS
-	- on `/api/machine/{id}/unlock` → publish `{type:"unlock"}`
-- Optional: add a lightweight polling in frontend (every 2–5s) for `/public-status`, honoring `lockGraceRef`.
-- Provide a canonical `requirements.txt` and `.env.example` files.
-- Migrate FastAPI startup/shutdown to Lifespan events (deprecation notice).
-
-
-## Quick test checklist
-
-Backend
-- Start FastAPI (see run section). Verify “DB pool initialized” on startup.
-- Smoke test endpoints with PowerShell:
-```
-Invoke-RestMethod -Method Get http://localhost:8002/api/machine/M001/public-status
-```
-
-Frontend
-- `npm run dev` then open http://localhost:5173
-- Select a machine -> enter code shown on device -> Lock -> proceed to payment (test mode)
-
-ESP32
-- Watch Serial Monitor; you should see: Wi‑Fi connected → WS connected → register/status → `display_code` received.
-
+---
 
 ## License
 
-Proprietary – internal project (update if you intend to open‑source).
-
+Proprietary — internal project.

@@ -1,472 +1,300 @@
-# **SmartVend ESP32 Device Firmware Specification**
+# SmartVend ESP32 Device Firmware Specification — v3.0
 
-## **1\. Device Overview**
+## 1. Device Overview
 
 The ESP32 acts as the **embedded controller of the SmartVend machine**.  
-Its responsibilities are:
+v3.0 uses an **OLED display** to render **QR codes** for session-based vending.
 
-1. Connect to WiFi  
-2. Connect to the SmartVend backend server  
-3. Display vending codes to users  
-4. Receive commands from the server  
-5. Control the motor driver to dispense napkins  
-6. Send status updates  
-7. Confirm completed transactions  
-8. Provide a local diagnostic interface  
-9. Maintain machine lock/unlock state
-10. Hardware Watchdog protection against hangs
-11. Motor Jam Detection based on current sensing
-12. Multi-WiFi auto-scanned failover reconnection
+### Responsibilities
+
+1. Connect to WiFi (multi-network auto-scan)
+2. Connect to SmartVend backend via WebSocket
+3. **Generate and display QR codes on OLED** ← NEW in v3.0
+4. Receive session lifecycle messages from server
+5. Control the motor driver to dispense napkins
+6. Confirm completed transactions via HTTPS
+7. Provide a local web-based diagnostic interface
+8. Hardware Watchdog protection (10s)
+9. Motor Jam Detection (current sensing GPIO 34)
+10. HTTP fallback command polling
 
 ---
 
-# **2\. Hardware Components Controlled by ESP32**
+## 2. Hardware Components
 
 | Component | Function |
-| ----- | ----- |
+| --- | --- |
 | ESP32 DevKit V1 | Main controller |
-| 16x2 LCD (I2C) | Displays machine status and code |
+| **0.96" OLED SSD1306 (128×64px)** | **QR code + status display** ← NEW |
 | L298N Motor Driver | Controls dispensing motor |
 | DC Gear Motor | Rotates dispensing coil |
-| Buck Converter | Converts 12V → 5V |
-| Power Supply | 12V adapter |
-| Push buttons (optional) | Maintenance |
-| Web control panel | Local testing |
+| Buck Converter | 12V → 5V |
+| 12V Power Adapter | Primary power |
+| Current Sensor (GPIO 34) | Motor jam detection |
+
+### Removed from v2.0
+- ~~16×2 I2C LCD~~ → Replaced by 0.96" OLED
 
 ---
 
-# **3\. Pin Mapping**
+## 3. Pin Mapping
 
 | ESP32 Pin | Component | Purpose |
-| ----- | ----- | ----- |
+| --- | --- | --- |
 | GPIO25 | ENA | Motor speed PWM |
 | GPIO26 | IN1 | Motor direction |
 | GPIO27 | IN2 | Motor direction |
-| GPIO21 | SDA | LCD I2C |
-| GPIO22 | SCL | LCD I2C |
+| GPIO21 | SDA | OLED I2C data |
+| GPIO22 | SCL | OLED I2C clock |
 | GPIO2 | LED | Motor activity indicator |
-| GPIO34 | Current Sensor| Motor jam detection (Analog) |
+| GPIO34 | Current Sensor | Motor jam detection (Analog) |
+
+### OLED I2C Address
+- Default: `0x3C` (common for SSD1306)
+- Alternate: `0x3D` (if `0x3C` fails)
 
 ---
 
-# **4\. Device States**
+## 4. Device States (v3.0)
 
-The machine operates in **two main states**.
+v3.0 replaces the simple LOCKED/UNLOCKED model with a full state machine:
 
-## **UNLOCKED**
+```
+BOOTING → IDLE ←→ OFFLINE
+            ↓
+         IN_USE
+            ↓
+        DISPENSING
+            ↓
+        COMPLETED → IDLE (new session)
+            |
+          ERROR → IDLE (auto-recovery 60s)
+```
 
-Machine is available for purchase.  
-Actions:  
-• Shows code on LCD  
-• Sends heartbeat to server  
-• Waits for purchase  
-SmartVend  
-Code: 3854
-
----
-
-## **LOCKED**
-
-Machine is processing a purchase.  
-Actions:  
-• Wait for dispense command  
-• Dispense napkin  
-• Confirm transaction  
-SmartVend  
-Locked
-
----
-
-# **5\. Boot Sequence**
-
-When ESP32 powers on:
-
-### **Step 1**
-
-Initialize serial  
-Serial.begin(115200)
-
-### **Step 2**
-
-Initialize motor pins  
-pinMode(ENA, OUTPUT)  
-pinMode(IN1, OUTPUT)  
-pinMode(IN2, OUTPUT)
-
-Motor stopped.  
----
-
-### **Step 3**
-
-Initialize LCD  
-lcd.init()  
-lcd.backlight()
-
-Display:  
-Connecting WiFi
+| State | OLED Display | Description |
+| --- | --- | --- |
+| **BOOTING** | \"SmartVend\" header + status text | Startup, WiFi connect, health check |
+| **IDLE** | \"SmartVend\" header + **QR Code** + \"Scan Me\" | Ready for customer — QR shows session URL |
+| **IN_USE** | \"SmartVend\" header + \"IN USE\" + user name | Session claimed, waiting for payment/dispense |
+| **DISPENSING** | \"SmartVend\" header + \"Dispensing\" + progress bar | Motor running, animated progress |
+| **COMPLETED** | \"SmartVend\" header + \"Done!\" + checkmark | 2-second flash after dispense |
+| **ERROR** | \"SmartVend\" header + \"ERROR!\" + message | Jam or hardware failure |
+| **OFFLINE** | \"SmartVend\" header + \"Offline\" + \"Reconnecting...\" | Backend unreachable |
 
 ---
 
-### **Step 4**
+## 5. Boot Sequence
 
-Connect to WiFi (Best Network)  
-The ESP32 scans for known networks and connects to the one with the strongest signal (best RSSI).
-
-List of known networks:
-1. Goutham's Galaxy
-2. SmartVendLab
-3. HomeWiFi
-
-Wait until connected.  
-Display:  
-SmartVend
-WiFi Connected
+1. `Serial.begin(115200)`
+2. Configure Watchdog (10s timeout)
+3. Initialize motor + LED pins → motor stopped
+4. **Initialize OLED** (`SSD1306_SWITCHCAPVCC`, address `0x3C`)
+5. Display: "Connecting WiFi..."
+6. Connect to best WiFi (RSSI scan)
+7. Display: "WiFi Connected!"
+8. Health check (`GET /health`) — retry 5× with backoff
+9. Open WebSocket (`wss://smartvend.onrender.com/ws`)
+10. Start local web server (port 80)
 
 ---
 
-### **Step 5**
+## 6. WebSocket Protocol (v3.0)
 
-Check server health  
-Endpoint  
-GET /health
+### ESP32 → Server
 
-URL  
-https://smartvend.onrender.com/health
+| Message | When | Purpose |
+| --- | --- | --- |
+| `{"type":"register","machine_id":"M001","api_key":"sv_001mmsg"}` | On WS connect | Authenticate + create session |
+| `{"type":"pong"}` | Response to ping | Keepalive |
+| `{"type":"status","value":"timeout"}` | IN_USE timeout | Report local timeout |
+| `{"type":"error","value":"motor_jam"}` | Jam detected | Report hardware error |
 
-Retry up to **5 times**.  
----
+### Server → ESP32
 
-### **Step 6**
+| Message | When | OLED Action |
+| --- | --- | --- |
+| `{"type":"session","token":"xK9mBq2P","url":"https://...","expires_at":"..."}` | After register / QR rotation | **Render QR code** |
+| `{"type":"claimed","claimed_by_name":"Goutham"}` | User scans QR | Switch to "IN USE" display |
+| `{"type":"new_session","token":"pR7nWm4K","url":"https://...","expires_at":"..."}` | After completion / session expiry | **Render new QR code** |
+| `{"type":"command","action":"dispense","duration":2,"transaction_id":"..."}` | Payment confirmed | Start motor + show progress |
+| `{"type":"ping"}` | Every 30s | ESP32 replies pong |
+| `{"type":"stock_update","stock":15}` | Admin refill | Log only (informational) |
+| `{"type":"error","error":"..."}` | Server error | Show error screen |
 
-Open WebSocket  
-wss://smartvend.onrender.com/ws
-
-Port  
-443
-
----
-
-# **6\. Device Registration**
-
-After WebSocket connects.  
-ESP32 sends:
-
-### **Message**
-
-{  
-"type":"register",  
-"machine\_id":"M001",  
-"api\_key":"sv\_001mmsg"  
-}
-
-Purpose:  
-• Authenticate device  
-• Link machine with backend  
----
-
-# **7\. Status Heartbeat**
-
-While **UNLOCKED**, device sends status every:  
-1 second
-
-Message:  
-{  
-"type":"status",  
-"value":"active"  
-}
-
-Purpose:  
-• Server knows machine is alive.  
----
-
-# **8\. Display Code Fetch**
-
-Every **5 minutes** ESP32 asks server for display code.  
-Message:  
-{  
-"type":"fetch\_display"  
-}
-
-**Code is strictly generated and rotated on the server** to ensure integrity between DB, Backend, and Machine.
-
-Server responds:  
-{  
-"type":"display\_code",  
-"value":"3854"  
-}
-
-ESP32 displays:  
-SmartVend  
-Code: 3854
+### Removed from v2.0
+- ~~`{"type":"lock"}`~~ → Replaced by `{"type":"claimed"}`
+- ~~`{"type":"unlock"}`~~ → Replaced by `{"type":"new_session"}`
+- ~~`{"type":"display_code","value":"3854"}`~~ → Replaced by `{"type":"session"}`
+- ~~`{"type":"fetch_display"}`~~ → No longer needed (server pushes sessions)
 
 ---
 
-# **9\. Purchase Flow**
+## 7. QR Code Generation
 
-## **Step 1**
+The ESP32 generates QR codes **on-device** from the session URL.
 
-User scans QR and pays.  
-Backend locks machine.  
-Server sends:  
-{  
-"type":"lock"  
-}
+### URL Format
+```
+https://smartvend.onrender.com/vend/{machine_id}/{session_token}
+```
+Example: `https://smartvend.onrender.com/vend/M001/xK9mBq2P`
 
-ESP32 changes state.  
-Display:  
-SmartVend
-Locked
+### QR Parameters
+- **Version**: 4 (33×33 modules) — fits ~78 alphanumeric chars
+- **Error Correction**: LOW (maximizes data capacity)
+- **Scale**: 1-2 pixels per module → fits 64×64 OLED area
+- **Library**: [QRCode by ricmoo](https://github.com/ricmoo/QRCode)
 
----
-
-## **Step 2**
-
-Backend confirms payment.  
-Server sends:  
-{  
-"type":"command",  
-"action":"dispense",  
-"transaction\_id":"TX\_23842",  
-"duration":1  
-}
-
----
-
-# **10\. Dispensing Operation**
-
-ESP32 receives dispense command.  
-Motor logic:  
-IN1 \= HIGH  
-IN2 \= LOW  
-ENA \= PWM 255
-
-Motor runs.  
-Run duration:  
-duration \* BASE\_RUN\_TIME
-
-Example  
-BASE\_RUN\_TIME \= 2000 ms  
-duration \= 1  
-motor run \= 2 seconds
+### OLED Layout (128×64px)
+```
+┌─────────────────────────────┐
+│  ┌─────────┐   Scan Me     │
+│  │         │   M001        │
+│  │   QR    │               │
+│  │  Code   │   <-- QR      │
+│  │         │               │
+│  └─────────┘   v3.0        │
+└─────────────────────────────┘
+   Left 64px      Right 64px
+```
 
 ---
 
-Display during dispense:  
-SmartVend
-Dispensing...
+## 8. Purchase Flow (v3.0)
 
-LED indicator ON.  
----
+### Step 1: QR Displayed (STATE_IDLE)  
+OLED shows QR code for current session URL.
 
-# **11\. Dispense Completion**
+### Step 2: User Scans QR  
+Server sends: `{"type":"claimed","claimed_by_name":"Goutham"}`  
+ESP32 switches to "IN USE" display (no more QR visible).
 
-After motor stops.  
-ESP32 sends confirmation.  
-Endpoint:  
-POST /api/machine/{machine\_id}/confirm
+### Step 3: User Pays  
+Backend verifies payment, sends dispense command:  
+```json
+{"type":"command","action":"dispense","duration":2,"transaction_id":"TX_23842"}
+```
 
-Example:  
-POST /api/machine/M001/confirm
+### Step 4: Dispensing (STATE_DISPENSING)  
+Motor runs for `duration × BASE_RUN_TIME (4000ms)`.  
+OLED shows progress bar animation.
 
-Headers:  
-Content-Type: application/json  
-Authorization: Bearer sv\_001mmsg
+### Step 5: Confirmation  
+Motor stops → ESP32 sends `POST /api/machine/M001/confirm`  
+```json
+{"transaction_id":"TX_23842","dispensed":2}
+```
 
-Payload:  
-{  
-"transaction\_id":"TX\_23842",  
-"dispensed":1  
-}
-
----
-
-# **12\. Unlock After Completion**
-
-Server sends:  
-{  
-"type":"unlock"  
-}
-
-ESP32 returns to UNLOCKED.  
-Display:  
-SmartVend  
-Code: 4219
+### Step 6: New Session (STATE_IDLE)  
+Server sends `{"type":"new_session","token":"...","url":"..."}` via WS or in confirm response.  
+ESP32 renders **new QR code** → ready for next customer.
 
 ---
 
-# **13\. Lock Timeout**
+## 9. Dispense Confirmation
 
-If dispense not triggered within:  
-10 minutes
+**Endpoint**: `POST /api/machine/{machine_id}/confirm`
 
-ESP32 automatically unlocks.  
----
+**Headers**:
+```
+Content-Type: application/json
+Authorization: Bearer sv_001mmsg
+```
 
-# **14\. WebSocket Reconnect**
+**Payload**:
+```json
+{"transaction_id":"TX_23842","dispensed":2}
+```
 
-If connection lost.  
-Reconnect every:  
-Reconnect every:  
-5 seconds (WS) / 30 seconds (WiFi Health Check)
-
----
-
-# **15\. HTTP Fallback Command Polling**
-
-If WebSocket fails.  
-ESP32 polls:  
-GET /device/commands/{machine\_id}
-
-Example  
-GET /device/commands/M001
-
-Interval:  
-15 seconds
+**Flow**: After motor stops → immediate HTTP confirmation.
 
 ---
 
-# **16\. Local Web Control Panel**
-
-ESP32 hosts local server.  
-Port  
-80
-
-Access  
-http://ESP32\_IP
-
-Features:  
-• LCD display preview  
-• Motor start  
-• Motor stop  
-• Speed control  
-Endpoints:  
-GET /  
-GET /status  
-POST /motor/start  
-POST /motor/stop
-
----
-
-# **17\. Motor Safety**
-
-Motor automatically stops when:  
-current\_time \> motor\_start \+ duration
-
-Prevents continuous spinning.  
----
-
-# **18\. Error Handling**
-
-| Error | Action |
-| ----- | ----- |
-| WiFi lost | reconnect (Best WiFi Scan) |
-| WebSocket lost | reconnect |
-| Server unreachable | HTTP fallback |
-| Motor stuck | Jam Detection Stop -> Report ERROR |
-| Software Hang | Hardware Watchdog Reset (10s) |
-
----
-
-# **19\. Timing Summary**
+## 10. Timing Summary (v3.0)
 
 | Task | Interval |
-| ----- | ----- |
-| Heartbeat (WS) | 1 sec |
-| WiFi Health Check | 30 sec |
-| Fetch display code | 5 min |
-| HTTP fallback polling | 15 sec |
-| Lock timeout | 10 min |
+| --- | --- |
+| **Heartbeat (WS pong)** | **30 sec** ← changed from 1s |
+| WiFi health check | 30 sec |
+| HTTP fallback polling | 15 sec (only when WS is down) |
+| IN_USE local timeout | 10 min |
 | WebSocket reconnect | 5 sec |
 | Hardware Watchdog | 10 sec |
+| "Done!" flash | 2 sec |
+| Error auto-recovery | 60 sec |
 
 ---
 
-# **20\. Security**
+## 11. Required Libraries
 
-Machine authentication uses:  
-machine\_id  
-api\_key
+Install via Arduino Library Manager:
 
-Example  
-M001  
-sv\_001mmsg
+| Library | Version | Purpose |
+| --- | --- | --- |
+| **Adafruit SSD1306** | ≥2.5 | OLED driver |
+| **Adafruit GFX** | ≥1.11 | Graphics primitives |
+| **QRCode** (ricmoo) | ≥0.0.1 | QR bitmap generation |
+| **WebSocketsClient** | ≥2.4 | WebSocket over TLS |
+| **ArduinoJson** | ≥6.0 | JSON parse/serialize |
 
-Used in:  
-• register message  
-• confirmation API  
----
-
-# **21\. Network Architecture**
-
-User → Web App → Backend → ESP32
-
-Communication types:
-
-| Type | Protocol |
-| ----- | ----- |
-| Realtime commands | WebSocket |
-| Transaction confirmation | HTTPS |
-| Fallback polling | HTTPS |
+Built-in (no install needed):
+- `WiFi.h`, `WiFiClientSecure.h`, `HTTPClient.h`, `WebServer.h`, `Wire.h`, `esp_task_wdt.h`
 
 ---
 
-# **22\. Power Architecture**
+## 12. Error Handling
 
-12V Adapter  
-   │  
-   ├── Motor Driver  
-   │  
-   └── Buck Converter  
-         │  
-         ├── ESP32  
-         └── LCD
-
-Ground: **Common bus ground**  
----
-
-# **23\. Capacitor Protection**
-
-Added to prevent:  
-• motor noise  
-• voltage spikes  
-• ESP32 reset  
-Capacitor placements:
-
-| Location | Purpose |
-| ----- | ----- |
-| 12V rail | smooth input |
-| Buck input | suppress spikes |
-| Buck output | stabilize 5V |
-| ESP32 supply | noise filtering |
-| Motor terminals | EMI suppression |
+| Error | Action |
+| --- | --- |
+| WiFi lost | Auto-reconnect (best WiFi scan) |
+| WebSocket lost | Auto-reconnect (5s interval) |
+| Server unreachable | HTTP fallback polling |
+| Motor stuck (jam) | Emergency stop → report → ERROR state |
+| Software hang | Hardware Watchdog reset (10s) |
+| OLED init fail | Continue without display (motor still works) |
+| QR generation fail | Display "QR Error!" text |
+| IN_USE timeout | Return to IDLE + re-display QR (10 min) |
+| ERROR state | Auto-recovery after 60s (re-register) |
 
 ---
 
-# **24\. Expected Machine Behavior**
+## 13. Security
 
-Normal cycle:  
-Idle → Show code  
-User pays  
-Machine locks  
-Dispense command  
-Motor rotates  
-Confirm transaction  
-Unlock  
-Show new code
+- Machine authentication: `machine_id` + `api_key` in register message
+- API key in `Authorization: Bearer` header for HTTP confirm endpoint
+- TLS (port 443) for all HTTPS and WSS connections
+- `secureClient.setInsecure()` — TODO: pin CA certificate for production
 
 ---
 
-# **25\. Reliability Strategy**
+## 14. Power Architecture
 
-• Heartbeat monitoring  
-• Automatic reconnect (Best Signal Scan)  
-• Fallback HTTP polling  
-• Motor Jam Detection (Current Sensing)
-• Hardware Watchdog (10s Task WDT)
-• Motor timeout protection  
-• Capacitor filtering
+```
+12V Adapter
+   │
+   ├── Motor Driver (L298N)
+   │
+   └── Buck Converter (12V → 5V)
+         │
+         ├── ESP32
+         └── OLED (3.3V via ESP32)
+```
 
-### **Production Hardware Logic (GPIO 34)**
-The jam detection uses analog samples from GPIO 34. If the reading exceeds **800** for more than **200ms**, the motor is emergency stopped. This state is reported to the backend via WebSocket/HTTP as `motor_jam`.
+**Ground**: Common bus ground  
+**Capacitors**: On 12V rail, buck I/O, ESP32 supply, motor terminals
 
+---
 
+## 15. Local Web Control Panel
+
+**Access**: `http://<ESP32_IP>/`
+
+**Endpoints**:
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/` | Web control panel HTML |
+| GET | `/status` | JSON status (state, motor, session, speed) |
+| POST | `/motor/start?speed=200` | Manual motor start |
+| POST | `/motor/stop` | Manual motor stop |
+
+**Updated in v3.0**: Shows current state (IDLE/IN_USE/DISPENSING/etc.), session token, and OLED line content instead of LCD lines and display code.

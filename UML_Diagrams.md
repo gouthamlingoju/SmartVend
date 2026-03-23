@@ -1,4 +1,4 @@
-# SmartVend UML Diagrams
+# SmartVend UML Diagrams (v3.0 — QR-Based)
 
 ## 1. Use Case Diagram
 
@@ -7,30 +7,31 @@ graph TB
     subgraph Actors
         User["👤 User"]
         Admin["🔧 Admin"]
-        ESP32["⚙️ ESP32 Device"]
+        ESP32["⚙️ ESP32 + OLED"]
         Razorpay["💳 Razorpay"]
     end
 
     subgraph SmartVend System
         UC1["View Machine List"]
-        UC2["Lock Machine by Code"]
-        UC3["Select Quantity"]
-        UC4["Make Payment"]
-        UC5["Receive Dispensed Item"]
-        UC6["Submit Feedback"]
-        UC7["Unlock Machine"]
-        UC8["Admin Login"]
-        UC9["View Dashboard"]
-        UC10["Update Stock"]
-        UC11["View Feedback"]
-        UC12["Register Machine via WS"]
-        UC13["Receive Dispense Command"]
-        UC14["Confirm Dispensing"]
-        UC15["Report Error"]
-        UC16["Display Code on LCD"]
-        UC17["Process Payment"]
-        UC18["Verify Payment Signature"]
-        UC19["Send Webhook Events"]
+        UC2["Scan QR Code"]
+        UC3["Claim Session"]
+        UC4["Select Quantity"]
+        UC5["Make Payment"]
+        UC6["Receive Dispensed Item"]
+        UC7["Cancel Session"]
+        UC8["Submit Feedback"]
+        UC9["Admin Login"]
+        UC10["View Dashboard"]
+        UC11["Update Stock"]
+        UC12["View Feedback"]
+        UC13["Register Machine via WS"]
+        UC14["Render QR on OLED"]
+        UC15["Receive Dispense Command"]
+        UC16["Confirm Dispensing"]
+        UC17["Report Error / Jam"]
+        UC18["Process Payment"]
+        UC19["Verify Signature"]
+        UC20["Send Webhook Events"]
     end
 
     User --> UC1
@@ -40,27 +41,28 @@ graph TB
     User --> UC5
     User --> UC6
     User --> UC7
+    User --> UC8
 
-    Admin --> UC8
     Admin --> UC9
     Admin --> UC10
     Admin --> UC11
+    Admin --> UC12
 
-    ESP32 --> UC12
     ESP32 --> UC13
     ESP32 --> UC14
     ESP32 --> UC15
     ESP32 --> UC16
+    ESP32 --> UC17
 
-    Razorpay --> UC17
     Razorpay --> UC18
     Razorpay --> UC19
+    Razorpay --> UC20
 
-    UC2 -.->|"includes"| UC16
-    UC4 -.->|"includes"| UC17
-    UC4 -.->|"includes"| UC18
-    UC5 -.->|"includes"| UC13
-    UC5 -.->|"includes"| UC14
+    UC2 -.->|"triggers"| UC3
+    UC5 -.->|"includes"| UC18
+    UC5 -.->|"includes"| UC19
+    UC6 -.->|"includes"| UC15
+    UC6 -.->|"includes"| UC16
 ```
 
 ---
@@ -76,26 +78,37 @@ classDiagram
         +String api_key
         +int current_stock
         +String status
-        +String display_code
-        +DateTime display_code_expires_at
         +DateTime last_seen_at
         +DateTime last_refill_at
     }
 
-    class Lock {
+    class Session {
+        +UUID id
+        +String session_token
         +String machine_id
-        +String locked_by
-        +String access_code_hash
-        +DateTime locked_at
-        +DateTime expires_at
         +String status
+        +String claimed_by
+        +DateTime claimed_at
+        +DateTime expires_at
+        +DateTime created_at
+        +DateTime completed_at
+    }
+
+    class Order {
+        +String order_id
+        +UUID session_id
+        +String machine_id
+        +String client_id
+        +int quantity
+        +int amount
+        +boolean reserved_stock
+        +DateTime created_at
     }
 
     class Transaction {
         +UUID id
         +String machine_id
         +String client_id
-        +String access_code
         +int amount
         +int quantity
         +String payment_status
@@ -107,42 +120,65 @@ classDiagram
     class Event {
         +UUID id
         +String machine_id
+        +UUID session_id
+        +String event_type
         +String client_id
-        +String type
         +JSON payload
         +DateTime created_at
     }
 
     class FastAPIBackend {
         +websocket_endpoint()
-        +lock_by_code()
+        +claim_session()
+        +session_status()
+        +cancel_session()
         +trigger_dispense()
-        +confirm_dispense()
         +create_order()
         +verify_payment()
-        +list_machines()
+        +razorpay_webhook()
+        +confirm_machine()
         +admin_login()
         +update_stock()
+        +session_expiry_sweeper()
+    }
+
+    class SessionDB {
+        +create_session()
+        +claim_session()
+        +get_session_by_token()
+        +cancel_session()
+        +update_session_status()
+        +expire_stale_sessions()
+        +expire_and_renew_sessions()
+        +reserve_stock_atomic()
+        +release_stock()
+        +create_order_record()
+        +complete_session()
+        +trigger_dispense_session()
+        +log_event()
     }
 
     class ESP32Device {
-        +DeviceState state
-        +String currentDisplayCode
-        +String lockedByName
-        +bool motorRunning
-        +webSocketEvent()
-        +sendRegister()
-        +sendConfirmation()
-        +fetchDisplayCode()
+        +MachineState currentState
+        +String sessionToken
+        +String sessionUrl
+        +drawHeader()
+        +displayQRCode()
+        +displayInUse()
+        +displayDispensing()
+        +displayCompleted()
+        +displayError()
+        +displayOffline()
         +motorRunForward()
         +motorStop()
+        +checkJam()
     }
 
     class ReactFrontend {
         +App
         +MachineList
         +VendingMachine
-        +LockSection
+        +VendingSession
         +QuantitySelector
         +SuccessPopup
         +AdminDashboard
@@ -155,12 +191,13 @@ classDiagram
         +utility.verify_payment_signature()
     }
 
-    Machine "1" -- "0..1" Lock : has
+    Machine "1" -- "0..*" Session : has
     Machine "1" -- "0..*" Transaction : generates
     Machine "1" -- "0..*" Event : logs
+    Session "1" -- "0..*" Order : maps to
+    Session "1" -- "0..*" Event : logged
+    FastAPIBackend --> SessionDB : uses
     FastAPIBackend --> Machine : manages
-    FastAPIBackend --> Lock : manages
-    FastAPIBackend --> Transaction : creates
     FastAPIBackend --> RazorpayClient : uses
     ESP32Device --> FastAPIBackend : connects via WebSocket
     ReactFrontend --> FastAPIBackend : API calls
@@ -171,101 +208,127 @@ classDiagram
 
 ## 3. Sequence Diagrams
 
-### 3.1 Lock and Dispense Flow
+### 3.1 QR Scan → Claim → Pay → Dispense (v3.0)
 
 ```mermaid
 sequenceDiagram
     actor User
-    participant UI as React Frontend
+    participant Phone as Phone Browser
+    participant FE as React Frontend
     participant API as FastAPI Backend
     participant DB as Supabase DB
     participant WS as WebSocket
-    participant ESP as ESP32 Device
+    participant ESP as ESP32 + OLED
     participant RP as Razorpay
 
-    Note over ESP,API: ESP32 Boot & Registration
-    ESP->>API: WS connect + register(machine_id, api_key)
-    API->>DB: upsert_machine()
-    API-->>ESP: display_code message
-    ESP->>ESP: LCD shows "Code: XXXXXX"
+    Note over ESP,API: Boot & Registration
+    ESP->>API: WS: register(M001, api_key)
+    API->>DB: upsert machine + create session
+    API-->>ESP: WS: { type: "session", token, url }
+    ESP->>ESP: Generate QR bitmap → render on OLED
 
-    Note over User,ESP: User Lock Flow
-    User->>UI: Enter name + display code
-    UI->>API: POST /api/lock-by-code {client_id, code, name}
-    API->>DB: Find machine by display_code
-    API->>DB: Check existing lock
-    API->>DB: Create lock row (expires_at = now+10min)
-    API->>DB: Set machine status = locked
-    API-->>UI: {machine_id, status: locked, expires_at}
-    API->>ESP: WS: {type: lock, locked_by_name}
-    ESP->>ESP: State → LOCKED, LCD "By: {name}"
-    UI->>User: Alert "Locked until X"
-    UI->>API: GET /public-status (fetch server time)
-    API-->>UI: {server_time, expires_at}
-    UI->>UI: Start countdown timer
+    Note over User,ESP: QR Scan Flow
+    User->>ESP: Scans QR with phone camera
+    Phone->>FE: Opens /vend/M001/xK9mBq2P
+    FE->>API: GET /api/session/status { token, client_id }
+    API-->>FE: { status: "active" }
+    FE->>FE: Show name entry (first time) or auto-claim
+    FE->>API: POST /api/session/claim { token, client_id, name }
+    API->>DB: UPDATE sessions SET status='in_progress' WHERE token=? AND status='active'
+    API->>DB: UPDATE machines SET status='in_use'
+    API-->>FE: { status: "in_progress", expires_at }
+    API->>ESP: WS: { type: "claimed", claimed_by_name: "Goutham" }
+    ESP->>ESP: OLED: "SmartVend" + "IN USE" + "Goutham"
 
     Note over User,RP: Payment Flow
-    User->>UI: Select quantity, click Pay
-    UI->>API: POST /create-order {quantity, machine_id}
-    API->>DB: check_stock_available()
-    API->>RP: order.create({amount, currency})
-    RP-->>API: {order_id, amount}
-    API-->>UI: order data
-    UI->>RP: Open Razorpay checkout
-    User->>RP: Complete payment
-    RP-->>UI: {payment_id, signature}
-    UI->>API: POST /verify-payment
-    API->>RP: verify_payment_signature()
-    RP-->>API: verified
-    API-->>UI: Payment verified
+    User->>FE: Select qty=2, click Pay ₹20
+    FE->>API: POST /create-order { qty, machine_id, session_token }
+    API->>DB: Reserve stock (atomic decrement)
+    API->>RP: order.create({ amount: 2000 })
+    RP-->>API: { order_id }
+    API->>DB: INSERT INTO orders (order_id, session_id, ...)
+    API-->>FE: order data
+    FE->>RP: Open checkout
+    User->>RP: Completes payment
+    RP-->>FE: { payment_id, signature }
+    FE->>API: POST /verify-payment
+    API->>RP: verify_signature()
+    API-->>FE: Verified ✓
 
-    Note over UI,ESP: Dispense Flow
-    UI->>API: POST /trigger-dispense {client_id, access_code, quantity, tx_id}
-    API->>DB: Validate lock ownership & access_code
-    API->>DB: Create transaction row
-    API->>DB: Update lock status → consumed
-    API->>ESP: WS: {type: command, action: dispense, duration, tx_id}
-    ESP->>ESP: Motor runs for duration
-    ESP->>ESP: Motor stops
-    ESP->>API: POST /confirm {transaction_id, dispensed}
-    API->>DB: Update transaction → completed
-    API->>DB: Decrement current_stock
-    API->>DB: Delete lock row
-    API->>DB: Generate new display_code
-    API->>ESP: WS: {type: unlock}
-    API->>ESP: WS: {type: display_code, value: NEW_CODE}
-    ESP->>ESP: State → UNLOCKED, LCD "Code: NEW_CODE"
-    UI->>User: Show success popup
+    Note over FE,ESP: Dispense
+    FE->>API: POST /api/session/trigger-dispense { token, client_id, qty, tx_id }
+    API->>DB: Check idempotency, create transaction
+    API->>DB: UPDATE sessions SET status='dispensing'
+    API->>ESP: WS: { type: "command", action: "dispense", duration: 2, tx_id }
+    ESP->>ESP: OLED: "SmartVend" + "Dispensing..." + progress bar
+    ESP->>ESP: Motor runs → stops
+    ESP->>API: POST /confirm { tx_id, dispensed: 2 }
+    API->>DB: Complete transaction + session
+    API->>DB: Create new session (new token)
+    API->>ESP: WS: { type: "new_session", token: "pR7nWm4K", url: "..." }
+    ESP->>ESP: Generate new QR → render on OLED
+    API-->>FE: Success
+    FE->>User: Show success popup → feedback form 🎉
 ```
 
-### 3.2 Lock Timeout Flow
+### 3.2 Session Expiry & QR Rotation
 
 ```mermaid
 sequenceDiagram
-    participant Sweeper as Lock Expiry Sweeper
+    participant Sweeper as Session Expiry Sweeper
     participant API as FastAPI Backend
     participant DB as Supabase DB
-    participant ESP as ESP32 Device
+    participant ESP as ESP32 + OLED
 
-    Note over Sweeper: Runs every 2 seconds
-    loop Every 2 seconds
-        Sweeper->>DB: Check expired locks
-        alt Lock expired
-            Sweeper->>DB: Delete lock row
-            Sweeper->>DB: Rotate display_code
-            Sweeper->>DB: Set machine status → idle
-            Sweeper->>ESP: WS: {type: unlock}
-            Sweeper->>ESP: WS: {type: display_code, value: NEW}
-            ESP->>ESP: State → UNLOCKED
+    Note over Sweeper: Runs every 10 seconds
+    loop Every 10 seconds
+        Sweeper->>DB: SELECT expired sessions WHERE status IN ('active','in_progress') AND expires_at < NOW()
+        alt Active session expired (nobody scanned)
+            Sweeper->>DB: UPDATE session SET status='expired'
+            Sweeper->>DB: CREATE new session for machine
+            Sweeper->>ESP: WS: { type: "new_session", token, url }
+            ESP->>ESP: Generate new QR → render on OLED
+        else In_progress session expired (user abandoned)
+            Sweeper->>DB: UPDATE session SET status='expired'
+            Sweeper->>DB: Release reserved stock (if any)
+            Sweeper->>DB: SET machine status='idle'
+            Sweeper->>DB: CREATE new session for machine
+            Sweeper->>ESP: WS: { type: "new_session", token, url }
+            ESP->>ESP: Generate new QR → render on OLED
         end
     end
-
-    Note over ESP: ESP32 also has local timeout
-    ESP->>ESP: if LOCKED > 10 min → UNLOCKED
-    ESP->>API: WS: {type: status, value: unlocked}
 ```
 
-### 3.3 Admin Operations Flow
+### 3.3 Webhook Reconciliation (Tab Closed After Payment)
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant FE as React Frontend
+    participant API as FastAPI Backend
+    participant DB as Supabase DB
+    participant ESP as ESP32
+    participant RP as Razorpay
+
+    User->>FE: Pays via Razorpay
+    FE->>FE: ⚠️ User closes tab BEFORE /trigger-dispense
+
+    RP->>API: POST /api/razorpay-webhook (payment.captured)
+    API->>API: Verify webhook HMAC signature
+    API->>DB: Look up order_id → session_id, machine_id, quantity
+    API->>DB: Check: transaction exists for this order?
+    alt No existing transaction
+        API->>DB: Create transaction { status: 'webhook_captured' }
+        API->>DB: UPDATE sessions SET status='dispensing'
+        API->>ESP: WS: { type: "command", action: "dispense", duration, tx_id }
+        API->>DB: Log event: 'webhook_auto_dispense'
+        ESP->>ESP: Motor runs → confirms
+    else Transaction already exists
+        API->>API: Skip (already handled)
+    end
+```
+
+### 3.4 Admin Operations
 
 ```mermaid
 sequenceDiagram
@@ -273,7 +336,7 @@ sequenceDiagram
     participant UI as Admin Dashboard
     participant API as FastAPI Backend
     participant DB as Supabase DB
-    participant ESP as ESP32 Device
+    participant ESP as ESP32
 
     Admin->>UI: Navigate to /admin
     UI->>UI: Check stored token
@@ -286,15 +349,15 @@ sequenceDiagram
         Admin->>UI: Enter password
         UI->>API: POST /api/admin/login
         API->>API: Verify password hash
-        API-->>UI: {token}
+        API-->>UI: { token }
         UI->>UI: Store token, show dashboard
     end
 
     Admin->>UI: Click "Update Stock"
     Admin->>UI: Enter new stock level
-    UI->>API: POST /api/machine/{id}/update-stock {stock}
+    UI->>API: POST /api/machine/{id}/update-stock { stock }
     API->>DB: Update current_stock, last_refill_at
-    API->>ESP: WS: {type: stock_update, stock}
+    API->>ESP: WS: { type: "stock_update", stock }
     API-->>UI: Success
 ```
 
@@ -302,181 +365,215 @@ sequenceDiagram
 
 ## 4. Activity Diagrams
 
-### 4.1 User Complete Flow
+### 4.1 User Complete Flow (v3.0)
 
 ```mermaid
 flowchart TD
-    A([Start]) --> B[Open SmartVend App]
-    B --> C[View Machine List]
-    C --> D{Select Machine}
-    D -->|Machine Available| E[View Machine Page]
-    D -->|Machine Offline/Out of Stock| C
+    A([Start]) --> B["Scan QR on machine OLED"]
+    B --> C["Phone opens /vend/M001/xK9mBq2P"]
+    C --> D{"Session status?"}
 
-    E --> F{Machine Locked by Others?}
-    F -->|Yes| G[Wait for countdown to end]
+    D -->|"active"| E{"Has saved name?"}
+    E -->|Yes| F["Auto-claim with saved name"]
+    E -->|No| G["Enter name → click Continue"]
     G --> F
-    F -->|No| H[Enter Name & Display Code]
+    D -->|"in_progress + owner"| H["Resume session"]
+    D -->|"in_progress + other"| I["Show 'Session in use' error"]
+    D -->|"expired / 404"| J["Show 'QR Expired' screen"]
+    D -->|"completed"| K["Show 'Completed' screen"]
 
-    H --> I[Click Lock]
-    I --> J{Lock Success?}
-    J -->|No - Invalid Code| H
-    J -->|No - Already Locked| G
-    J -->|Yes| K[Alert: Machine Locked]
+    F --> L["Session claimed ✓"]
+    H --> L
+    L --> M["Select Quantity"]
+    M --> N["Click Pay ₹X"]
+    N --> O["POST /create-order"]
+    O --> P{"Stock available?"}
+    P -->|No| Q["Error: Out of stock"]
+    Q --> M
+    P -->|Yes| R["Open Razorpay Checkout"]
 
-    K --> L[Dismiss Alert]
-    L --> M[Fetch Server Time]
-    M --> N[Start 10-min Countdown]
+    R --> S{"Payment completed?"}
+    S -->|Cancelled| M
+    S -->|Success| T["POST /verify-payment"]
 
-    N --> O[Select Quantity]
-    O --> P[Click Proceed to Payment]
-    P --> Q{Locked?}
-    Q -->|No| H
-    Q -->|Yes| R[Create Razorpay Order]
+    T --> U{"Verified?"}
+    U -->|No| V["Error: Verification failed"]
+    V --> M
+    U -->|Yes| W["POST /api/session/trigger-dispense"]
 
-    R --> S{Stock Available?}
-    S -->|No| T[Error: Insufficient Stock]
-    T --> O
-    S -->|Yes| U[Open Razorpay Checkout]
+    W --> X["ESP32 runs motor"]
+    X --> Y["Dispensing animation on frontend"]
+    Y --> Z["ESP32 confirms → backend completes session"]
+    Z --> AA["Success popup"]
+    AA --> AB["Feedback form"]
+    AB --> AC(["Done → redirect home"])
 
-    U --> V{Payment Completed?}
-    V -->|Cancelled| O
-    V -->|Yes| W[Verify Payment Signature]
-
-    W --> X{Verified?}
-    X -->|No| Y[Error: Verification Failed]
-    Y --> O
-    X -->|Yes| Z[Trigger Dispense]
-
-    Z --> AA[ESP32 Runs Motor]
-    AA --> AB[Show Dispensing Animation]
-    AB --> AC[ESP32 Confirms Dispensing]
-    AC --> AD[Show Success Popup]
-    AD --> AE[Show Feedback Form]
-    AE --> AF([End])
-
-    N --> AG{Timeout?}
-    AG -->|10 min elapsed| AH[Auto Unlock]
-    AH --> C
+    L --> AD{"Claim TTL expired?"}
+    AD -->|"5 min elapsed"| AE["Session auto-expired"]
+    AE --> AF["New QR on machine"]
 ```
 
-### 4.2 ESP32 State Machine
+### 4.2 ESP32 State Machine (v3.0)
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Boot
-    Boot --> WiFiConnect
-    WiFiConnect --> WaitHealth
-    WaitHealth --> WSConnect
-    WSConnect --> UNLOCKED
+    [*] --> BOOTING
+    BOOTING --> IDLE : WiFi + WS connected + registered
 
-    state UNLOCKED {
-        ShowCode : Show display code on LCD
-        SendHeartbeat : Send heartbeat every 1s
-        RefreshCode : Refresh code every 5 min
-
-        [*] --> ShowCode
-        ShowCode --> SendHeartbeat
-        SendHeartbeat --> ShowCode
-        ShowCode --> RefreshCode
-        RefreshCode --> ShowCode
+    state IDLE {
+        ShowQR : OLED shows SmartVend + QR code
+        WaitScan : Awaiting user scan
+        [*] --> ShowQR
+        ShowQR --> WaitScan
     }
 
-    state LOCKED {
-        ShowLockedBy : LCD shows locked by username
-        WaitCommand : Awaiting dispense command
-        Dispensing : Received dispense command
-        MotorRunning : Motor running forward
-        MotorDone : Duration elapsed
-        JamDetected : Current spike detected
-        SendConfirm : POST confirm to server
-        WaitUnlock : Awaiting unlock from server
-        ErrorState : Stays LOCKED and sends error
+    state IN_USE {
+        ShowInUse : OLED shows SmartVend + In Use + name
+        WaitPayment : Awaiting dispense command
+        [*] --> ShowInUse
+        ShowInUse --> WaitPayment
+    }
 
-        [*] --> ShowLockedBy
-        ShowLockedBy --> WaitCommand
-        WaitCommand --> Dispensing
-        Dispensing --> MotorRunning
+    state DISPENSING {
+        MotorRunning : Motor forward + progress bar
+        MotorDone : Duration elapsed
+        JamDetected : Current spike on GPIO 34
+        SendConfirm : POST /confirm to server
+        [*] --> MotorRunning
         MotorRunning --> MotorDone
         MotorRunning --> JamDetected
         MotorDone --> SendConfirm
-        SendConfirm --> WaitUnlock
-        JamDetected --> ErrorState
-        ErrorState --> WaitUnlock
     }
 
-    UNLOCKED --> LOCKED : Receive lock WS msg
-    LOCKED --> UNLOCKED : Receive unlock WS msg
-    LOCKED --> UNLOCKED : Lock timeout 10 min
-
-    state WiFiLost {
-        Reconnecting : Attempting reconnection
-        [*] --> Reconnecting
-        Reconnecting --> [*]
+    state COMPLETED {
+        ShowDone : OLED shows SmartVend + Done! + checkmark
+        [*] --> ShowDone
     }
 
-    UNLOCKED --> WiFiLost : WiFi disconnected
-    LOCKED --> WiFiLost : WiFi disconnected
-    WiFiLost --> WSConnect : WiFi restored
+    state ERROR {
+        ShowError : OLED shows SmartVend + Error message
+        [*] --> ShowError
+    }
+
+    state OFFLINE {
+        ShowOffline : OLED shows SmartVend + Offline
+        Reconnecting : Auto-retry every 30s
+        [*] --> ShowOffline
+        ShowOffline --> Reconnecting
+    }
+
+    IDLE --> IN_USE : WS "claimed" message
+    IDLE --> IDLE : WS "new_session" (QR rotation)
+    IN_USE --> DISPENSING : WS "command" dispense
+    IN_USE --> IDLE : Local timeout 10 min
+    IN_USE --> IDLE : WS "new_session" (session expired)
+    DISPENSING --> COMPLETED : Motor done + confirmed
+    DISPENSING --> ERROR : Jam detected
+    COMPLETED --> IDLE : After 2s flash + new QR
+    ERROR --> IDLE : Auto-recovery after 60s
+
+    IDLE --> OFFLINE : WiFi/WS disconnected
+    IN_USE --> OFFLINE : WiFi/WS disconnected
+    OFFLINE --> BOOTING : WiFi restored
 ```
 
-### 4.3 Payment Processing Activity
+### 4.3 Payment + Dispense Flow (v3.0)
 
 ```mermaid
 flowchart TD
-    A([Payment Initiated]) --> B[POST /create-order]
-    B --> C{Razorpay Configured?}
-    C -->|No| D[Error: Razorpay not configured]
-    C -->|Yes| E{Quantity > 0?}
-    E -->|No| F[Error: Invalid quantity]
-    E -->|Yes| G[Check Stock Availability]
+    A(["Payment Initiated"]) --> B["POST /create-order"]
+    B --> C{"Session valid + owned?"}
+    C -->|No| D["Error: Invalid session"]
+    C -->|Yes| E{"Quantity > 0?"}
+    E -->|No| F["Error: Invalid quantity"]
+    E -->|Yes| G["Atomic stock reservation"]
 
-    G --> H{Stock >= Quantity?}
-    H -->|No| I[Error 409: Insufficient stock]
-    H -->|Yes| J[Create Razorpay Order]
-    J --> K[Return order to frontend]
+    G --> H{"Stock >= Quantity?"}
+    H -->|No| I["Error 409: Insufficient stock"]
+    H -->|Yes| J["Create Razorpay Order"]
+    J --> K["Store order_id → session mapping"]
+    K --> L["Return order to frontend"]
 
-    K --> L[Frontend opens Razorpay Checkout]
-    L --> M{User completes payment?}
-    M -->|Cancelled| N([Payment Cancelled])
-    M -->|Success| O[POST /verify-payment]
+    L --> M["Frontend opens Razorpay Checkout"]
+    M --> N{"User completes payment?"}
+    N -->|Cancelled| O["Session stays claimed, can retry"]
+    N -->|Success| P["POST /verify-payment"]
 
-    O --> P[Verify Razorpay Signature]
-    P --> Q{Signature Valid?}
-    Q -->|No| R[Error 400: Verification failed]
-    Q -->|Yes| S[POST /trigger-dispense]
+    P --> Q["POST /api/session/trigger-dispense"]
+    Q --> R{"Transaction already processed?"}
+    R -->|Yes| S["Return: duplicate"]
+    R -->|No| T["Validate session ownership"]
 
-    S --> T{Transaction already processed?}
-    T -->|Yes| U[Error 409: Duplicate]
-    T -->|No| V[Validate lock ownership]
+    T --> U{"Session valid?"}
+    U -->|Invalid| V["Error: Session invalid"]
+    U -->|Valid| W["Create transaction record"]
 
-    V --> W{Lock valid & owned?}
-    W -->|No lock| X[Error 409: No active lock]
-    W -->|Not owner| Y[Error 403: Not lock owner]
-    W -->|Code mismatch| Z[Error 403: Access mismatch]
-    W -->|Expired| AA[Error 409: Lock expired]
-    W -->|Valid| AB[Create transaction record]
-
-    AB --> AC[Mark lock as consumed]
-    AC --> AD[Set machine status: dispatch_sent]
-    AD --> AE[Send WS command to ESP32]
-    AE --> AF([Dispatch Sent])
+    W --> X["UPDATE session → dispensing"]
+    X --> Y["Send WS dispense command"]
+    Y --> Z(["Dispense in progress"])
 ```
 
-### 4.4 Server-Side Lock Expiry
+### 4.4 Session Expiry Sweeper (v3.0)
 
 ```mermaid
 flowchart TD
-    A([Lock Expiry Sweeper Running]) --> B[Sleep 2 seconds]
-    B --> C[Iterate connected machines]
-    C --> D{Machine has active lock?}
-    D -->|No| C
-    D -->|Yes| E{Lock expired?}
-    E -->|No| C
-    E -->|Yes| F[Delete lock row]
-    F --> G[Generate new display code]
-    G --> H[Set machine status: idle]
-    H --> I[Send WS unlock to ESP32]
-    I --> J[Send new display_code to ESP32]
-    J --> K[Publish to Redis for other workers]
-    K --> C
+    A(["Sweeper Running"]) --> B["Sleep 10 seconds"]
+    B --> C["Query DB: expired active sessions"]
+    C --> D{"Any expired?"}
+    D -->|No| B
+    D -->|Yes| E["For each expired session:"]
+
+    E --> F{"Was it in_progress?"}
+    F -->|Yes| G["Release reserved stock if order exists"]
+    G --> H["Set machine status → idle"]
+    F -->|No| H
+
+    H --> I["SET session status → expired"]
+    I --> J["Create new session for machine"]
+    J --> K{"Machine connected via WS?"}
+    K -->|Yes| L["Send WS: new_session { token, url }"]
+    K -->|No| M["Pending for next connect"]
+    L --> B
+    M --> B
+```
+
+---
+
+## 5. Deployment Architecture
+
+```mermaid
+graph TB
+    subgraph "User Devices"
+        Phone["📱 Phone (QR Scan)"]
+        Browser["🌐 Browser"]
+    end
+
+    subgraph "Cloud (Render)"
+        Backend["FastAPI Backend<br/>uvicorn + WebSocket"]
+    end
+
+    subgraph "Supabase"
+        DB["PostgreSQL<br/>machines, sessions, orders,<br/>transactions, events"]
+    end
+
+    subgraph "Redis"
+        Redis["Redis Pub/Sub<br/>Cross-worker WS fanout"]
+    end
+
+    subgraph "Razorpay"
+        RP["Payment Gateway<br/>Orders + Webhooks"]
+    end
+
+    subgraph "Hardware"
+        ESP["ESP32 + OLED<br/>QR Code + Motor"]
+    end
+
+    Phone --> Browser
+    Browser -->|HTTPS| Backend
+    ESP -->|WSS| Backend
+    ESP -->|HTTPS| Backend
+    Backend -->|REST| DB
+    Backend -->|PubSub| Redis
+    Backend -->|REST| RP
+    RP -->|Webhook| Backend
 ```
