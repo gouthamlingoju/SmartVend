@@ -34,10 +34,10 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _generate_session_token(length: int = 8) -> str:
+def _generate_session_token(length: int = 6) -> str:
     """Generate a URL-safe token for QR codes.
-    8-char base62 = 62^8 = 218 trillion combinations.
-    Short enough for QR Version 4 (fits 64×64 OLED).
+    6-char base62 = 62^6 = 56.8 billion combinations.
+    Extremely short so it easily fits under the Version 2 QR boundary (32 bytes).
     """
     alphabet = string.ascii_letters + string.digits  # base62
     return ''.join(secrets.choice(alphabet) for _ in range(length))
@@ -931,7 +931,7 @@ async def register_machine_session(machine_id: str, api_key: str) -> Dict:
 
     token = new_session.get("session_token")
     base_url = FRONTEND_URL or "https://smartvend.onrender.com"
-    url = f"{base_url}/vend/{machine_id}/{token}"
+    url = f"{base_url}/s/{token}"
 
     # 4. Log event
     await log_event(

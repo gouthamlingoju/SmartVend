@@ -194,78 +194,88 @@ void displayBootScreen(const char* statusText) {
 }
 
 void displayQRCode(const char* url) {
-  /*
-   * Generate and render QR code on OLED.
-   * Header "SmartVend" (14px) at top.
-   * QR fits in 50px height below header, left side.
-   * Right side shows "Scan Me" + machine ID.
-   */
   display.clearDisplay();
-  drawHeader();
-  
-  // Generate QR code
+
+  // Max contrast
+  display.ssd1306_command(SSD1306_SETCONTRAST);
+  display.ssd1306_command(0xFF);
+
+  // Strip https:// to shorten payload
+  const char* qrText = url;
+  if (strncmp(qrText, "https://", 8) == 0) qrText += 8;
+  else if (strncmp(qrText, "http://", 7) == 0) qrText += 7;
+
+  // ── KEY CHANGE 1: Use ECC_LOW to get smallest possible QR ──
+  // Clean OLED display doesn't need high redundancy
   QRCode qrcode;
-  uint8_t qrcodeData[qrcode_getBufferSize(4)];  // Version 4
-  int qrResult = qrcode_initText(&qrcode, qrcodeData, 4, ECC_LOW, url);
-  
-  if (qrResult != 0) {
-    // Fallback if URL too long: try version 6
-    uint8_t qrcodeDataV6[qrcode_getBufferSize(6)];
-    qrResult = qrcode_initText(&qrcode, qrcodeDataV6, 6, ECC_LOW, url);
-    if (qrResult != 0) {
-      display.setTextSize(1);
-      display.setCursor(0, 34);
-      display.print("QR Error!");
-      display.display();
-      Serial.printf("[OLED] QR generation failed for: %s\n", url);
-      return;
-    }
+  uint8_t qrcodeData[qrcode_getBufferSize(10)];
+
+  int qrResult = -1;
+  int version = 1;
+  while (version <= 10) {
+    qrResult = qrcode_initText(&qrcode, qrcodeData, version, ECC_LOW, qrText);
+    if (qrResult == 0) break;
+    version++;
   }
-  
-  // Calculate scaling: fit QR into 50px height area (below 14px header)
-  uint8_t availableHeight = 50;  // 64 - 14 header
-  uint8_t moduleSize = availableHeight / qrcode.size;
+
+  if (qrResult != 0) {
+    display.setCursor(0, 30);
+    display.print("QR Error");
+    display.display();
+    return;
+  }
+
+  // ── KEY CHANGE 2: Use full 64px for QR, scale as large as possible ──
+  uint8_t moduleSize = 64 / qrcode.size;
   if (moduleSize < 1) moduleSize = 1;
-  
-  // Center QR within left 64px area, below header
   uint8_t qrPixelSize = qrcode.size * moduleSize;
-  uint8_t offsetX = (64 - qrPixelSize) / 2;
-  uint8_t offsetY = 14 + (availableHeight - qrPixelSize) / 2;
-  
-  // Draw QR code modules
+
+  // ── KEY CHANGE 3: Center QR on RIGHT half with quiet zone ──
+  // Right half = x:64 to x:127 (64px wide)
+  uint8_t quietZone = moduleSize; // 1 module quiet zone
+  uint8_t offsetX = 128 - qrPixelSize - quietZone;
+  uint8_t offsetY = (64 - qrPixelSize) / 2;
+
+  // ── KEY CHANGE 4: Draw WHITE quiet zone border first ──
+  // This is what scanners use to FIND the QR code
+  display.fillRect(offsetX - quietZone, 
+                   offsetY - quietZone, 
+                   qrPixelSize + quietZone * 2, 
+                   qrPixelSize + quietZone * 2, 
+                   SSD1306_WHITE);
+
+  // ── KEY CHANGE 5: Draw BLACK modules on WHITE background ──
+  // Black-on-white is the standard QR orientation
   for (uint8_t y = 0; y < qrcode.size; y++) {
     for (uint8_t x = 0; x < qrcode.size; x++) {
-      if (qrcode_getModule(&qrcode, x, y)) {
+      if (qrcode_getModule(&qrcode, x, y)) {  // Corrected: true = dark module
         display.fillRect(
           offsetX + x * moduleSize,
           offsetY + y * moduleSize,
           moduleSize,
           moduleSize,
-          SSD1306_WHITE
+          SSD1306_BLACK
         );
       }
     }
   }
-  
-  // Right side: "Scan" text + machine ID
+
+  // Left side text
   display.setTextSize(1);
-  display.setCursor(70, 18);
-  display.print("Scan Me");
-  
-  display.setCursor(70, 32);
-  display.print(machine_id);
-  
-  // Small arrow pointing to QR
-  display.setCursor(70, 50);
-  display.print("<-- QR");
-  
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 8);  display.print("SmartVend");
+  display.setCursor(0, 26); display.print("Scan Me");
+  display.setCursor(0, 42); display.print("ID:");
+  display.setCursor(0, 52); display.print(machine_id);
+
   display.display();
-  
+
   // Cache for web panel
   displayLine1 = "SmartVend";
   displayLine2 = String("QR: ") + currentSessionToken;
-  
-  Serial.printf("[OLED] QR rendered for: %s\n", url);
+
+  Serial.printf("[OLED] QR v%d, %dx%d modules, scale=%dpx\n", 
+                version, qrcode.size, qrcode.size, moduleSize);
 }
 
 void displayInUse(const char* userName) {
@@ -951,12 +961,18 @@ void setup() {
 
   // OLED Display
   Wire.begin();  // SDA=21, SCL=22 (default ESP32)
+  
   if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_I2C_ADDR)) {
     Serial.println("[OLED] SSD1306 init FAILED!");
-    // Continue anyway — motor still works
   } else {
     Serial.println("[OLED] SSD1306 initialized");
+    
+    // I2C DATA FIX: Drop to 100kHz for stable data wires
+    Wire.setClock(100000); 
+    
+    // (Contrast logic handled in displayQRCode method now)
   }
+  
   display.clearDisplay();
   display.display();
 

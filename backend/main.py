@@ -35,7 +35,7 @@ from fastapi import (
 )
 from services.email_service import send_email_async
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse, HTMLResponse
 from pydantic import BaseModel, Field, constr
 
 from auth import AuthHandler
@@ -323,7 +323,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         if session:
                             base_url = FRONTEND_URL or "https://smartvend.onrender.com"
                             token = session.get("session_token")
-                            url = f"{base_url}/vend/{machine_id}/{token}"
+                            url = f"{base_url}/s/{token}"
                             await websocket.send_text(json.dumps({
                                 "type": "session",
                                 "token": token,
@@ -336,7 +336,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             if new_session:
                                 base_url = FRONTEND_URL or "https://smartvend.onrender.com"
                                 token = new_session.get("session_token")
-                                url = f"{base_url}/vend/{machine_id}/{token}"
+                                url = f"{base_url}/s/{token}"
                                 await websocket.send_text(json.dumps({
                                     "type": "session",
                                     "token": token,
@@ -423,6 +423,21 @@ async def _redis_pubsub_listener(rclient):
 # ══════════════════════════════════════════════
 #  v3.0 SESSION ENDPOINTS
 # ══════════════════════════════════════════════
+
+@app.get("/s/{token}")
+async def short_link_redirect(token: str):
+    """Short URL redirection for ESP32 QR codes to minimize length.
+    Maps /s/TOKEN straight to the frontend /vend/M001/TOKEN route.
+    """
+    if not db.pool:
+        raise HTTPException(status_code=500, detail="Database not configured")
+    session = await session_db.get_session_by_token(token)
+    if not session:
+        return HTMLResponse("<h1>Session expired or invalid.</h1><p>Please scan the new QR code on the machine.</p>", 404)
+    
+    machine_id = session.get("machine_id")
+    base_url = FRONTEND_URL or "https://smartvend.onrender.com"
+    return RedirectResponse(f"{base_url}/vend/{machine_id}/{token}")
 
 @app.post("/api/session/claim")
 @limiter.limit("15/minute")
@@ -544,7 +559,7 @@ async def cancel_session(request: Request):
         if new_session:
             base_url = FRONTEND_URL or "https://smartvend.onrender.com"
             token = new_session.get("session_token")
-            url = f"{base_url}/vend/{machine_id}/{token}"
+            url = f"{base_url}/s/{token}"
             await _send_to_machine(machine_id, {
                 "type": "new_session",
                 "token": token,
