@@ -34,9 +34,9 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _generate_session_token(length: int = 6) -> str:
+def _generate_session_token(length: int = 4) -> str:
     """Generate a URL-safe token for QR codes.
-    6-char base62 = 62^6 = 56.8 billion combinations.
+    4-char base62 = 62^4 = 14 million combinations.
     Extremely short so it easily fits under the Version 2 QR boundary (32 bytes).
     """
     alphabet = string.ascii_letters + string.digits  # base62
