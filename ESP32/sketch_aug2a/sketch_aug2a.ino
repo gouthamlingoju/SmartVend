@@ -202,11 +202,12 @@ void displayQRCode(const char* url) {
   display.ssd1306_command(SSD1306_SETCONTRAST);
   display.ssd1306_command(0x3F); // 25% brightness
 
-  // ── TEMPORARY FIX: Encode only the 4-character token ──
-  // This physically forces the QR code down to Version 1 (21x21 modules),
-  // allowing the dots to expand from 2px to 3px on the 64px display.
-  // We will revert this to the full URL once a larger TFT display is hooked up.
-  const char* qrText = currentSessionToken.c_str();
+  // Strip https:// to shorten payload
+  // This will force the QR size to Version 2 (25x25) returning modules to 2px.
+  // 3px minimum optical clarity will be achieved when the larger display is swapped in.
+  const char* qrText = url;
+  if (strncmp(qrText, "https://", 8) == 0) qrText += 8;
+  else if (strncmp(qrText, "http://", 7) == 0) qrText += 7;
 
   // ── KEY CHANGE 1: Use ECC_LOW to get smallest possible QR ──
   // Clean OLED display doesn't need high redundancy
