@@ -232,16 +232,11 @@ void displayQRCode(const char* url) {
   if (moduleSize < 1) moduleSize = 1;
   uint8_t qrPixelSize = qrcode.size * moduleSize;
 
-  // Right half = x:64 to x:127 (64px wide)
-  uint8_t quietZone = moduleSize * 2; // 2 module quiet zone (prevents top-edge clipping)
-  uint8_t offsetY = (64 - qrPixelSize) / 2;
-  
-  // Safe clamping to prevent negative coordinates if version gets too large
-  if (quietZone > offsetY) {
-    quietZone = offsetY;
-  }
-  
-  uint8_t offsetX = 128 - qrPixelSize - 4; // Arbitrary 4px pad from edge
+  // ── KEY CHANGE: Center QR horizontally and vertically ──
+  // The OLED is 128px wide by 64px tall. Since the QR code is a square, 
+  // its maximum size is bounded by the 64px height.
+  uint8_t offsetX = (128 - qrPixelSize) / 2;  // CENTER horizontally
+  uint8_t offsetY = (64  - qrPixelSize) / 2;  // CENTER vertically
 
   // ── KEY CHANGE 5: Draw BLACK modules on WHITE background ──
   // Black-on-white is the standard QR orientation. The screen is already white.
@@ -259,21 +254,15 @@ void displayQRCode(const char* url) {
     }
   }
 
-  // Left side text
+  // Draw tiny ID in bottom-left corner to avoid overlapping the centered QR code
   display.setTextSize(1);
   display.setTextColor(SSD1306_BLACK); // Dark text on bright background
-  display.setCursor(0, 0);  display.print("SmartVend");
-  
-  display.setCursor(0, 16); display.print("Code:");
-  
-  // Big bold text for the 4-character session code
-  display.setTextSize(2);
-  display.setCursor(0, 26); display.print(currentSessionToken);
-  
-  // Back to small text for machine ID
-  display.setTextSize(1);
-  display.setCursor(0, 46); display.print("ID:");
-  display.setCursor(20, 46); display.print(machine_id);
+  display.setCursor(0, 56); 
+  display.print(machine_id);
+
+  // You can also put the 4-char code in the top-left corner
+  display.setCursor(0, 0); 
+  display.print(currentSessionToken);
 
   display.display();
 
