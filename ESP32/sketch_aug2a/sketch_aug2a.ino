@@ -263,10 +263,18 @@ void displayQRCode(const char* url) {
   // Left side text
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0, 8);  display.print("SmartVend");
-  display.setCursor(0, 26); display.print("Scan Me");
-  display.setCursor(0, 42); display.print("ID:");
-  display.setCursor(0, 52); display.print(machine_id);
+  display.setCursor(0, 0);  display.print("SmartVend");
+  
+  display.setCursor(0, 16); display.print("Code:");
+  
+  // Big bold text for the 4-character session code
+  display.setTextSize(2);
+  display.setCursor(0, 26); display.print(currentSessionToken);
+  
+  // Back to small text for machine ID
+  display.setTextSize(1);
+  display.setCursor(0, 46); display.print("ID:");
+  display.setCursor(20, 46); display.print(machine_id);
 
   display.display();
 
