@@ -230,11 +230,16 @@ void displayQRCode(const char* url) {
   if (moduleSize < 1) moduleSize = 1;
   uint8_t qrPixelSize = qrcode.size * moduleSize;
 
-  // ── KEY CHANGE 3: Center QR on RIGHT half with quiet zone ──
   // Right half = x:64 to x:127 (64px wide)
   uint8_t quietZone = moduleSize * 2; // 2 module quiet zone (prevents top-edge clipping)
-  uint8_t offsetX = 128 - qrPixelSize - quietZone;
   uint8_t offsetY = (64 - qrPixelSize) / 2;
+  
+  // Safe clamping to prevent negative coordinates if version gets too large
+  if (quietZone > offsetY) {
+    quietZone = offsetY;
+  }
+  
+  uint8_t offsetX = 128 - qrPixelSize - quietZone;
 
   // ── KEY CHANGE 4: Draw WHITE quiet zone border first ──
   // This is what scanners use to FIND the QR code
