@@ -195,6 +195,8 @@ void displayBootScreen(const char* statusText) {
 
 void displayQRCode(const char* url) {
   display.clearDisplay();
+  // Fill entire screen with WHITE to act as glowing background
+  display.fillRect(0, 0, 128, 64, SSD1306_WHITE);
 
   // Reduce contrast to fix intense blue camera glare
   display.ssd1306_command(SSD1306_SETCONTRAST);
@@ -239,18 +241,10 @@ void displayQRCode(const char* url) {
     quietZone = offsetY;
   }
   
-  uint8_t offsetX = 128 - qrPixelSize - quietZone;
-
-  // ── KEY CHANGE 4: Draw WHITE quiet zone border first ──
-  // This is what scanners use to FIND the QR code
-  display.fillRect(offsetX - quietZone, 
-                   offsetY - quietZone, 
-                   qrPixelSize + quietZone * 2, 
-                   qrPixelSize + quietZone * 2, 
-                   SSD1306_WHITE);
+  uint8_t offsetX = 128 - qrPixelSize - 4; // Arbitrary 4px pad from edge
 
   // ── KEY CHANGE 5: Draw BLACK modules on WHITE background ──
-  // Black-on-white is the standard QR orientation
+  // Black-on-white is the standard QR orientation. The screen is already white.
   for (uint8_t y = 0; y < qrcode.size; y++) {
     for (uint8_t x = 0; x < qrcode.size; x++) {
       if (qrcode_getModule(&qrcode, x, y)) {  // Corrected: true = dark module
@@ -267,7 +261,7 @@ void displayQRCode(const char* url) {
 
   // Left side text
   display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
+  display.setTextColor(SSD1306_BLACK); // Dark text on bright background
   display.setCursor(0, 0);  display.print("SmartVend");
   
   display.setCursor(0, 16); display.print("Code:");

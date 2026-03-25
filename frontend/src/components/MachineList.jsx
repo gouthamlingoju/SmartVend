@@ -28,7 +28,11 @@ export default function MachineList({ machines, onSelect, onRefresh }) {
     <div className="min-h-screen bg-gradient-to-br from-purple-200 via-blue-100 to-pink-100 p-8">
       <div className="max-w-4xl mx-auto">
 
-        <h1 className="text-3xl font-bold text-center mb-8 text-purple-700 drop-shadow">Select a Vending Machine</h1>
+        <h1 className="text-3xl font-bold text-center mb-4 text-purple-700 drop-shadow">SmartVend Network</h1>
+        <div className="text-center text-gray-700 mb-8 max-w-2xl mx-auto bg-white p-4 rounded-xl shadow-md border border-purple-100">
+          <p className="font-semibold text-lg text-purple-800 mb-2">How to use:</p>
+          <p>To purchase a product, locate a SmartVend machine near you and scan the QR code displayed on its screen using your phone's camera.</p>
+        </div>
         <div className="flex justify-center mb-6">
           <input
             type="text"
@@ -44,22 +48,20 @@ export default function MachineList({ machines, onSelect, onRefresh }) {
             const displayId = machine.machine_id || machine.id || 'N/A';
             const isActive = (machine.status === 'idle') || (machine.status === 'active'); // accept both
             return (
-              <button
+              <div
                 key={machineKey}
-                className={`bg-white rounded-xl shadow-lg p-6 flex flex-col items-center border-2 transition relative min-h-48 ${isActive ? 'border-purple-100 hover:border-purple-400' : 'border-gray-200 opacity-60 cursor-not-allowed'}`}
-                onClick={() => isActive ? onSelect(machine) : null}
-                disabled={!isActive}
+                className={`bg-white rounded-xl shadow-lg p-6 flex flex-col items-center border-2 min-h-48 ${isActive ? 'border-purple-100' : 'border-gray-200 opacity-60'}`}
                 style={{ background: isActive ? 'linear-gradient(135deg, #f3e8ff 0%, #e0e7ff 100%)' : '#f8fafc' }}
               >
                 <img src="/logo.png" alt="Machine" className="h-14 w-14 mb-3" />
                 <div className="font-bold text-lg text-purple-800 mb-1">{machine.location}</div>
                 <div className="text-gray-500 text-sm mb-2">ID: {displayId}</div>
                 {isActive ? (
-                  <div className="text-green-700 font-semibold">Available</div>
+                  <div className="text-green-700 font-semibold">Ready to Use</div>
                 ) : (
                   <div className="text-red-600 font-semibold">{machine.status}</div>
                 )}
-              </button>
+              </div>
             );
           })}
           {filteredMachines.length === 0 && (

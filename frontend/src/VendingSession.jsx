@@ -351,21 +351,12 @@ export default function VendingSession() {
               }
             }
 
-            // Show dispensing animation
-            setPhase(PHASE.DISPENSING);
-            setIsDispensing(true);
-
-            // Animate dispensed count locally
-            for (let i = 1; i <= selectedPads; i++) {
-              setTimeout(() => setDispensedPads(i), 2500 * i);
-            }
-
-            setTimeout(() => {
-              setIsDispensing(false);
-              setPhase(PHASE.COMPLETED);
-              setShowPopup(true);
-              setAvailablePads(prev => Math.max(0, prev - selectedPads));
-            }, selectedPads * 2500 + 500);
+            // success: immediately show success state (machine hardware dispenses instantly)
+            setAvailablePads(availablePads - selectedPads);
+            setIsDispensing(false);
+            setDispensedPads(selectedPads);
+            setShowPopup(true);
+            setPhase(PHASE.COMPLETED);
 
           } catch (err) {
             console.error("Payment/dispense error:", err);
