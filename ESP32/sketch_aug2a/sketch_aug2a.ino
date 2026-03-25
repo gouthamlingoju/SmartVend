@@ -196,9 +196,9 @@ void displayBootScreen(const char* statusText) {
 void displayQRCode(const char* url) {
   display.clearDisplay();
 
-  // Max contrast
+  // Reduce contrast to fix intense blue camera glare
   display.ssd1306_command(SSD1306_SETCONTRAST);
-  display.ssd1306_command(0xFF);
+  display.ssd1306_command(0x3F); // 25% brightness
 
   // Strip https:// to shorten payload
   const char* qrText = url;
@@ -232,7 +232,7 @@ void displayQRCode(const char* url) {
 
   // ── KEY CHANGE 3: Center QR on RIGHT half with quiet zone ──
   // Right half = x:64 to x:127 (64px wide)
-  uint8_t quietZone = moduleSize; // 1 module quiet zone
+  uint8_t quietZone = moduleSize * 2; // 2 module quiet zone (prevents top-edge clipping)
   uint8_t offsetX = 128 - qrPixelSize - quietZone;
   uint8_t offsetY = (64 - qrPixelSize) / 2;
 

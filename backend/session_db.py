@@ -699,8 +699,13 @@ async def trigger_dispense_session(
     if not session:
         return {"error": "session_not_found"}
 
-    if session.get("status") != "in_progress":
-        return {"error": "invalid_state", "detail": f"Session is {session.get('status')}"}
+    status = session.get("status")
+    if status in ("dispensing", "completed"):
+        # Race condition safety: the webhook already triggered dispense.
+        # Returning this exact error acts as a "SUCCESS" signal to frontend.
+        return {"error": "already_processed", "status": "duplicate"}
+    elif status != "in_progress":
+        return {"error": "invalid_state", "detail": f"Session is {status}"}
 
     if session.get("claimed_by") != client_id:
         return {"error": "not_owner"}
