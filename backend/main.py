@@ -80,6 +80,20 @@ session_sweeper_task = None
 REDIS_CHANNEL = "ws:commands"
 
 
+def _is_transient_razorpay_error(err: Exception) -> bool:
+    """Best-effort classifier for temporary network failures to Razorpay."""
+    msg = str(err).lower()
+    transient_markers = [
+        "remote end closed connection",
+        "remotedisconnected",
+        "connection aborted",
+        "connection reset",
+        "timed out",
+        "temporarily unavailable",
+    ]
+    return any(marker in msg for marker in transient_markers)
+
+
 # ──────────────────────────────────────────────
 #  Lifespan
 # ──────────────────────────────────────────────
@@ -1007,9 +1021,27 @@ async def create_order(request: Request):
                 )
 
         amount = quantity * PRICE_PER_UNIT_PAISA
-        order = razorpay_client.order.create(
-            {"amount": amount, "currency": "INR", "payment_capture": 1}
-        )
+        order_payload = {"amount": amount, "currency": "INR", "payment_capture": 1}
+        order = None
+        last_order_error = None
+        for attempt in range(3):
+            try:
+                order = razorpay_client.order.create(order_payload)
+                break
+            except Exception as e:
+                last_order_error = e
+                if not _is_transient_razorpay_error(e) or attempt == 2:
+                    raise
+                backoff_s = 0.35 * (attempt + 1)
+                print(
+                    f"⚠️ Razorpay order.create transient failure "
+                    f"(attempt {attempt + 1}/3): {e}. Retrying in {backoff_s:.2f}s..."
+                )
+                await asyncio.sleep(backoff_s)
+
+        if order is None:
+            raise RuntimeError(f"Razorpay order creation failed: {last_order_error}")
+
         order["unit_price_paise"] = PRICE_PER_UNIT_PAISA
         order["quantity"] = quantity
 

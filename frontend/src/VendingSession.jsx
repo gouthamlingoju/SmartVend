@@ -414,11 +414,6 @@ export default function VendingSession() {
     if (phase !== PHASE.EXPIRED && phase !== PHASE.COMPLETED) return;
 
     const timeout = setTimeout(() => {
-      if (phase === PHASE.EXPIRED) {
-        alert("This session has expired. Redirecting to home.");
-      } else {
-        alert("Payment completed. Redirecting to home.");
-      }
       navigate("/");
     }, 5000);
 
