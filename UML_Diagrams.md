@@ -243,26 +243,26 @@ sequenceDiagram
     Note over User,RP: Payment Flow
     User->>FE: Select qty=2, click Pay ₹20
     FE->>API: POST /create-order { qty, machine_id, session_token }
-    API->>DB: Reserve stock (atomic decrement)
+    API->>DB: Check stock availability (no decrement yet)
     API->>RP: order.create({ amount: 2000 })
     RP-->>API: { order_id }
     API->>DB: INSERT INTO orders (order_id, session_id, ...)
     API-->>FE: order data
     FE->>RP: Open checkout
     User->>RP: Completes payment
-    RP-->>FE: { payment_id, signature }
-    FE->>API: POST /verify-payment
-    API->>RP: verify_signature()
-    API-->>FE: Verified ✓
+    RP-->>FE: { payment_id, order_id, signature }
 
     Note over FE,ESP: Dispense
-    FE->>API: POST /api/session/trigger-dispense { token, client_id, qty, tx_id }
+    FE->>API: POST /api/session/trigger-dispense { token, client_id, qty, order_id, payment_id, signature }
+    API->>RP: verify_signature()
+    API->>DB: Validate order↔session↔client
+    API->>DB: Reserve stock (atomic decrement)
     API->>DB: Check idempotency, create transaction
     API->>DB: UPDATE sessions SET status='dispensing'
-    API->>ESP: WS: { type: "command", action: "dispense", duration: 2, tx_id }
+    API->>ESP: WS: { type: "command", action: "dispense", duration: 2, tx_id=order_id }
     ESP->>ESP: TFT: "SmartVend" + "Dispensing..." + progress bar
     ESP->>ESP: Motor runs → stops
-    ESP->>API: POST /confirm { tx_id, dispensed: 2 }
+    ESP->>API: POST /confirm { order_id, dispensed: 2 }
     API->>DB: Complete transaction + session
     API->>DB: Create new session (new token)
     API->>ESP: WS: { type: "new_session", token: "pR7nWm4K", url: "..." }
@@ -320,7 +320,7 @@ sequenceDiagram
     alt No existing transaction
         API->>DB: Create transaction { status: 'webhook_captured' }
         API->>DB: UPDATE sessions SET status='dispensing'
-        API->>ESP: WS: { type: "command", action: "dispense", duration, tx_id }
+        API->>ESP: WS: { type: "command", action: "dispense", duration, tx_id=order_id }
         API->>DB: Log event: 'webhook_auto_dispense'
         ESP->>ESP: Motor runs → confirms
     else Transaction already exists
@@ -394,12 +394,7 @@ flowchart TD
 
     R --> S{"Payment completed?"}
     S -->|Cancelled| M
-    S -->|Success| T["POST /verify-payment"]
-
-    T --> U{"Verified?"}
-    U -->|No| V["Error: Verification failed"]
-    V --> M
-    U -->|Yes| W["POST /api/session/trigger-dispense"]
+    S -->|Success| W["POST /api/session/trigger-dispense\n(with order_id + payment proof)"]
 
     W --> X["ESP32 runs motor"]
     X --> Y["Dispensing animation on frontend"]
@@ -486,7 +481,7 @@ flowchart TD
     C -->|No| D["Error: Invalid session"]
     C -->|Yes| E{"Quantity > 0?"}
     E -->|No| F["Error: Invalid quantity"]
-    E -->|Yes| G["Atomic stock reservation"]
+    E -->|Yes| G["Check stock availability"]
 
     G --> H{"Stock >= Quantity?"}
     H -->|No| I["Error 409: Insufficient stock"]
@@ -497,12 +492,10 @@ flowchart TD
     L --> M["Frontend opens Razorpay Checkout"]
     M --> N{"User completes payment?"}
     N -->|Cancelled| O["Session stays claimed, can retry"]
-    N -->|Success| P["POST /verify-payment"]
-
-    P --> Q["POST /api/session/trigger-dispense"]
+    N -->|Success| Q["POST /api/session/trigger-dispense\n(with order_id + payment proof)"]
     Q --> R{"Transaction already processed?"}
     R -->|Yes| S["Return: duplicate"]
-    R -->|No| T["Validate session ownership"]
+    R -->|No| T["Validate session + payment proof + order mapping"]
 
     T --> U{"Session valid?"}
     U -->|Invalid| V["Error: Session invalid"]

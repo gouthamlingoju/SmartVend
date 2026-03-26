@@ -373,7 +373,8 @@ async def create_order_record(
         "client_id": client_id,
         "quantity": quantity,
         "amount": amount,
-        "reserved_stock": True,
+        # Stock is reserved at dispense trigger (post-payment), not order creation.
+        "reserved_stock": False,
     }
 
     def _insert():
@@ -687,6 +688,7 @@ async def trigger_dispense_session(
     quantity: int,
     transaction_id: str,
     amount: int,
+    order_id: Optional[str] = None,
 ) -> Dict:
     """Validate session ownership and transition to DISPENSING.
     Creates the transaction record. Returns dispense command details.
@@ -718,6 +720,46 @@ async def trigger_dispense_session(
     session_id = session.get("id")
     machine_id = session.get("machine_id")
 
+    # If order_id is supplied, enforce order/session/client/quantity/amount alignment.
+    if order_id:
+        order = await get_order_by_id(order_id)
+        if not order:
+            return {"error": "order_not_found"}
+
+        if str(order.get("session_id")) != str(session_id) or str(order.get("machine_id")) != str(machine_id):
+            return {
+                "error": "order_mismatch",
+                "detail": "Order is not linked to this session or machine.",
+            }
+
+        order_client = str(order.get("client_id") or "")
+        if order_client and order_client != str(client_id):
+            return {
+                "error": "order_mismatch",
+                "detail": "Order is not owned by this client.",
+            }
+
+        try:
+            expected_qty = int(order.get("quantity") or 0)
+        except Exception:
+            expected_qty = 0
+        if expected_qty > 0 and int(quantity) != expected_qty:
+            return {
+                "error": "order_quantity_mismatch",
+                "detail": "Requested quantity does not match paid order quantity.",
+                "expected_quantity": expected_qty,
+            }
+
+        try:
+            expected_amount = int(order.get("amount") or 0)
+        except Exception:
+            expected_amount = 0
+        if expected_amount > 0 and int(amount) != expected_amount:
+            return {
+                "error": "order_amount_mismatch",
+                "detail": "Requested amount does not match paid order amount.",
+            }
+
     # DB-level idempotency check: does a transaction already exist for this session?
     import uuid
     try:
@@ -741,6 +783,16 @@ async def trigger_dispense_session(
     except Exception:
         pass
 
+    # Reserve stock only after payment verification (at dispense trigger).
+    reserve_result = await reserve_stock_atomic(machine_id, quantity)
+    if reserve_result.get("error"):
+        if reserve_result["error"] == "insufficient_stock":
+            return {
+                "error": "insufficient_stock",
+                "available": reserve_result.get("available"),
+            }
+        return {"error": reserve_result["error"]}
+
     # Create transaction row
     tx_payload = {
         "id": tx_uuid,
@@ -760,7 +812,10 @@ async def trigger_dispense_session(
     except Exception as e:
         error_str = str(e).lower()
         if "duplicate" in error_str or "unique" in error_str:
+            # Reservation happened in this request; release on duplicate race loser.
+            await release_stock(machine_id, quantity)
             return {"error": "already_processed", "status": "duplicate"}
+        await release_stock(machine_id, quantity)
         print(f"Transaction insert error: {e}")
         return {"error": "transaction_failed"}
 

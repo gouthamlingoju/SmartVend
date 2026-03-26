@@ -47,7 +47,7 @@ Connected vending machine platform with QR code-based session management.
 ### Key Features
 
 - **Session management** — create, claim, cancel, dispense, expire sessions
-- **Atomic operations** — stock reservation, session claiming (race-safe)
+- **Atomic operations** — stock checks + post-payment stock reservation, session claiming (race-safe)
 - **WebSocket** — real-time ESP32 communication at `/ws`
 - **Redis pub/sub** — cross-worker WebSocket fanout
 - **Razorpay** — order creation, signature verification, webhook reconciliation
@@ -97,7 +97,7 @@ Server: `http://localhost:8000` • WebSocket: `ws://localhost:8000/ws`
 | `POST` | `/api/session/claim` | Frontend | Claim session after QR scan |
 | `GET` | `/api/session/status` | Frontend | Check session state (resume on reload) |
 | `POST` | `/api/session/cancel` | Frontend | Cancel session, release stock |
-| `POST` | `/api/session/trigger-dispense` | Frontend | Trigger dispense after payment |
+| `POST` | `/api/session/trigger-dispense` | Frontend | Verify payment proof + trigger dispense |
 
 #### Machine & Payment
 
@@ -109,7 +109,7 @@ Server: `http://localhost:8000` • WebSocket: `ws://localhost:8000/ws`
 | `POST` | `/api/machine/{id}/report-error` | ESP32 | Error reporting |
 | `GET` | `/api/machines` | Frontend | List all machines |
 | `POST` | `/create-order` | Frontend | Razorpay order creation |
-| `POST` | `/verify-payment` | Frontend | Razorpay signature verification |
+| `POST` | `/verify-payment` | Frontend (optional) | Standalone Razorpay signature verification |
 | `POST` | `/api/razorpay-webhook` | Razorpay | Webhook reconciliation |
 | `GET` | `/health` | Any | Health check (returns `{ status: "ok", version: "3.0" }`) |
 

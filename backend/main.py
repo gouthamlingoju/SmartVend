@@ -578,7 +578,9 @@ async def session_trigger_dispense(request: Request):
         "session_token": "xK9mBq2P",
         "client_id": "abc123",
         "quantity": 2,
-        "transaction_id": "txn_xxx"
+        "razorpay_order_id": "order_xxx",
+        "razorpay_payment_id": "pay_xxx",
+        "razorpay_signature": "sig_xxx"
     }
     """
     if not db.pool:
@@ -588,18 +590,66 @@ async def session_trigger_dispense(request: Request):
     session_token = data.get("session_token")
     client_id = data.get("client_id")
     quantity = int(data.get("quantity", 1))
-    transaction_id = data.get("transaction_id")
+    razorpay_order_id = data.get("razorpay_order_id")
+    razorpay_payment_id = data.get("razorpay_payment_id")
+    razorpay_signature = data.get("razorpay_signature")
 
-    if not all([session_token, client_id, transaction_id]):
+    if not all([
+        session_token,
+        client_id,
+        razorpay_order_id,
+        razorpay_payment_id,
+        razorpay_signature,
+    ]):
         raise HTTPException(
             status_code=400,
-            detail="session_token, client_id, and transaction_id required"
+            detail=(
+                "session_token, client_id, razorpay_order_id, "
+                "razorpay_payment_id, and razorpay_signature required"
+            )
         )
 
-    amount = quantity * PRICE_PER_UNIT_PAISA
+    # Hard gate: never dispense unless backend verifies Razorpay signature.
+    if not razorpay_client:
+        raise HTTPException(status_code=500, detail="Razorpay not configured")
+
+    try:
+        razorpay_client.utility.verify_payment_signature(
+            {
+                "razorpay_order_id": razorpay_order_id,
+                "razorpay_payment_id": razorpay_payment_id,
+                "razorpay_signature": razorpay_signature,
+            }
+        )
+    except Exception:
+        return JSONResponse(
+            {
+                "error": "payment_verification_failed",
+                "message": "Payment verification failed. Dispense blocked.",
+            },
+            status_code=400,
+        )
+
+    order = await session_db.get_order_by_id(razorpay_order_id)
+    if not order:
+        return JSONResponse(
+            {
+                "error": "order_not_found",
+                "message": "Order record missing for this payment.",
+            },
+            status_code=404,
+        )
+
+    order_amount = int(order.get("amount") or (quantity * PRICE_PER_UNIT_PAISA))
+    transaction_id = razorpay_order_id
 
     result = await session_db.trigger_dispense_session(
-        session_token, client_id, quantity, transaction_id, amount
+        session_token,
+        client_id,
+        quantity,
+        transaction_id,
+        order_amount,
+        order_id=razorpay_order_id,
     )
 
     if result.get("error"):
@@ -608,9 +658,32 @@ async def session_trigger_dispense(request: Request):
             raise HTTPException(status_code=403, detail="Session not owned by this client")
         if error == "session_not_found":
             raise HTTPException(status_code=404, detail="Session not found")
+        if error == "insufficient_stock":
+            return JSONResponse(
+                {
+                    "error": "insufficient_stock",
+                    "available": result.get("available"),
+                    "message": "Insufficient stock at dispense time.",
+                },
+                status_code=409,
+            )
+        if error == "order_not_found":
+            return JSONResponse(
+                {"error": "order_not_found", "message": "No paid order found for this session."},
+                status_code=404,
+            )
         if error in ("already_processed", "duplicate"):
             return JSONResponse(
                 {"error": "Transaction already processed", "status": "duplicate"},
+                status_code=409,
+            )
+        if error in ("order_mismatch", "order_quantity_mismatch", "order_amount_mismatch"):
+            return JSONResponse(
+                {
+                    "error": error,
+                    "detail": result.get("detail"),
+                    "expected_quantity": result.get("expected_quantity"),
+                },
                 status_code=409,
             )
         if error == "session_expired":
@@ -632,7 +705,7 @@ async def session_trigger_dispense(request: Request):
         "type": "command",
         "action": "dispense",
         "duration": quantity,
-        "transaction_id": transaction_id,
+        "transaction_id": razorpay_order_id,
     })
 
     return {"status": "dispatch_sent", "machine_id": machine_id}
@@ -893,7 +966,9 @@ async def report_error(
 
 @app.post("/create-order")
 async def create_order(request: Request):
-    """Create Razorpay order with atomic stock reservation + order↔session mapping."""
+    """Create Razorpay order after session validation.
+    Stock is checked here and decremented only after payment verification.
+    """
     if not razorpay_client:
         return JSONResponse({"error": "Razorpay not configured"}, status_code=500)
     try:
@@ -905,6 +980,7 @@ async def create_order(request: Request):
         machine_id = data.get("machine_id")
         session_token = data.get("session_token")
         client_id = data.get("client_id")
+        session = None
 
         # v3.0: Validate session ownership before creating order
         if session_token and client_id:
@@ -919,12 +995,14 @@ async def create_order(request: Request):
             if session.get("claimed_by") != client_id:
                 return JSONResponse({"error": "Session not owned by this client"}, status_code=403)
 
-        # Atomic stock reservation
+        # Stock check only (no decrement at order creation)
         if machine_id:
-            reserve_result = await session_db.reserve_stock_atomic(machine_id, quantity)
-            if reserve_result.get("error"):
+            stock_ok = await db.check_stock_available(machine_id, quantity)
+            if not stock_ok:
+                machine = await db.get_machine_by_id(machine_id)
+                available = (machine or {}).get("current_stock", 0)
                 return JSONResponse(
-                    {"error": reserve_result["error"], "available": reserve_result.get("available")},
+                    {"error": "insufficient_stock", "available": available},
                     status_code=409,
                 )
 
@@ -937,7 +1015,7 @@ async def create_order(request: Request):
 
         # v3.0: Store order ↔ session mapping for webhook reconciliation
         if session_token and session:
-            await session_db.create_order_record(
+            order_record = await session_db.create_order_record(
                 order_id=order["id"],
                 session_id=session["id"],
                 machine_id=machine_id or session.get("machine_id"),
@@ -945,6 +1023,14 @@ async def create_order(request: Request):
                 quantity=quantity,
                 amount=amount,
             )
+            if not order_record:
+                return JSONResponse(
+                    {
+                        "error": "order_mapping_failed",
+                        "message": "Unable to initialize payment session. Please retry.",
+                    },
+                    status_code=500,
+                )
 
         return JSONResponse(order)
     except Exception as e:
@@ -1037,14 +1123,16 @@ async def razorpay_webhook(request: Request):
                     if session and session.get("status") == "in_progress":
                         print(f"🔄 WEBHOOK: Auto-triggering dispense for order {order_id}")
                         
-                        # Create a synthetic transaction_id for the webhook-triggered dispense
-                        tx_id = f"webhook_{order_id}"
+                        # Use order_id as transaction key for cross-path idempotency
+                        # (frontend trigger + webhook race on same payment).
+                        tx_id = order_id
                         result = await session_db.trigger_dispense_session(
                             session.get("session_token"),
                             client_id,
                             quantity,
                             tx_id,
                             amount or (quantity * PRICE_PER_UNIT_PAISA),
+                            order_id=order_id,
                         )
 
                         if result.get("status") == "ok":

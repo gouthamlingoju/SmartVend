@@ -152,7 +152,7 @@ CREATE TABLE IF NOT EXISTS orders (
   client_id TEXT,
   quantity INT,
   amount INT,
-  reserved_stock BOOLEAN DEFAULT TRUE,
+  reserved_stock BOOLEAN DEFAULT FALSE,        -- set TRUE only at dispense trigger
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 ```
@@ -258,7 +258,7 @@ Frontend → POST /create-order { quantity: 2, machine_id: "M001", session_token
 ↓
 Backend:
   1. Validate session is still in_progress and owned by client_id
-  2. Reserve stock atomically: UPDATE SET current_stock = current_stock - 2 WHERE current_stock >= 2
+  2. Check stock availability (no decrement yet)
   3. Create Razorpay order
   4. Store order_id ↔ session mapping in orders table
   5. Return order details to frontend
@@ -267,16 +267,15 @@ Frontend → opens Razorpay checkout → user pays
 ↓
 Razorpay → returns { payment_id, order_id, signature }
 ↓
-Frontend → POST /verify-payment → Backend verifies signature → "Payment verified"
-↓
-Frontend → POST /api/session/trigger-dispense { session_token, client_id, quantity, transaction_id }
+Frontend → POST /api/session/trigger-dispense { session_token, client_id, quantity, razorpay_order_id, razorpay_payment_id, razorpay_signature }
 ↓
 Backend:
-  1. Validate session ownership
-  2. Check idempotency in transactions table (not in-memory!)
-  3. Create transaction row
-  4. Update session status = 'dispensing'
-  5. Send WS: { type: "command", action: "dispense", duration: 2, transaction_id: "txn_xxx" }
+  1. Verify Razorpay signature on backend
+  2. Validate order ↔ session ↔ client ↔ quantity match
+  3. Atomically reserve stock (decrement now, not in create-order)
+  4. Check idempotency in transactions table (not in-memory!)
+  5. Create transaction row and set status='dispensing'
+  6. Send WS: { type: "command", action: "dispense", duration: 2, transaction_id: "order_xxx" }
 ↓
 ESP32 → TFT "Dispensing..." → motor runs for 2 × 4000ms
 ↓
@@ -364,7 +363,7 @@ Frontend:
   3. OR user can cancel: POST /api/session/cancel { session_token, client_id }
 ↓
 Backend on cancel:
-  1. Release stock reservation
+  1. No stock rollback needed (stock not decremented before verify)
   2. Set session status = 'expired'
   3. Create new session → send to ESP32
 ↓
@@ -677,9 +676,9 @@ These are SEPARATE config values:
 
 ### Rule 4: Stock Reservation is Atomic
 ```
-Stock decremented BEFORE payment via:
+Stock decremented AFTER payment verification (at dispense trigger) via:
   UPDATE machines SET current_stock = current_stock - qty WHERE current_stock >= qty
-Released on: payment failure, session expiry, explicit cancel.
+If transaction insert fails (duplicate/race), reserved stock is released.
 ```
 
 ### Rule 5: ESP32 is Stateless (Rendering Only)
@@ -718,7 +717,7 @@ NEVER lose a customer's money.
 | `POST` | `/api/session/claim` | Frontend (on QR scan) | Claim active session → in_progress |
 | `GET` | `/api/session/status` | Frontend (on reload) | Check session state for resume |
 | `POST` | `/api/session/cancel` | Frontend (explicit cancel) | Expire session, release stock |
-| `POST` | `/api/session/trigger-dispense` | Frontend (after payment) | Validated dispense trigger |
+| `POST` | `/api/session/trigger-dispense` | Frontend (after payment) | Backend payment verification + validated dispense trigger |
 
 ### Kept From v2.0
 
@@ -728,7 +727,7 @@ NEVER lose a customer's money.
 | `GET` | `/api/machine/{id}/status` | ESP32 status poll |
 | `POST` | `/api/machine/{id}/confirm` | ESP32 dispense confirmation |
 | `POST` | `/create-order` | Razorpay order creation |
-| `POST` | `/verify-payment` | Razorpay signature verification |
+| `POST` | `/verify-payment` | Optional standalone signature check |
 | `POST` | `/api/razorpay-webhook` | Webhook reconciliation |
 | `GET` | `/api/machines` | Frontend machine list |
 | `POST` | `/api/admin/login` | Admin auth |
@@ -839,26 +838,26 @@ sequenceDiagram
     Note over User,RP: Payment Flow
     User->>FE: Select qty=2, click Pay
     FE->>API: POST /create-order { qty, machine_id, session_token }
-    API->>DB: Reserve stock (atomic decrement)
+    API->>DB: Check stock availability
     API->>RP: order.create({ amount: 2000 })
     RP-->>API: { order_id }
     API->>DB: INSERT INTO orders (order_id, session_id, ...)
     API-->>FE: order data
     FE->>RP: Open checkout
     User->>RP: Completes payment
-    RP-->>FE: { payment_id, signature }
-    FE->>API: POST /verify-payment
-    API->>RP: verify_signature()
-    API-->>FE: Verified ✓
+    RP-->>FE: { payment_id, order_id, signature }
 
     Note over FE,ESP: Dispense
-    FE->>API: POST /api/session/trigger-dispense { token, client_id, qty, tx_id }
+    FE->>API: POST /api/session/trigger-dispense { token, client_id, qty, order_id, payment_id, signature }
+    API->>RP: verify_signature()
+    API->>DB: Validate order↔session ownership
+    API->>DB: Reserve stock atomically
     API->>DB: Check idempotency, create transaction
     API->>DB: UPDATE sessions SET status='dispensing'
-    API->>ESP: WS: { type: "command", action: "dispense", duration: 2, tx_id }
+    API->>ESP: WS: { type: "command", action: "dispense", duration: 2, tx_id=order_id }
     ESP->>ESP: Motor runs 8 sec
     ESP->>ESP: Motor stops
-    ESP->>API: POST /confirm { tx_id, dispensed: 2 }
+    ESP->>API: POST /confirm { order_id, dispensed: 2 }
     API->>DB: Complete transaction + session
     API->>DB: Create new session (new token)
     API->>ESP: WS: { type: "new_session", token: "pR7nWm4K", url: "..." }
@@ -884,8 +883,8 @@ sequenceDiagram
 - [x] Update `/create-order` to store `order_id ↔ session_id` mapping
 - [x] Update Razorpay webhook to auto-dispense on unmatched payment.captured
 - [x] Replace in-memory `_processed_transactions` with DB check
-- [x] Implement atomic stock reservation in `/create-order`
-- [x] Stock release on cancel / session expiry (via sweeper)
+- [x] Implement atomic stock reservation in `/api/session/trigger-dispense` (post-payment)
+- [x] Keep stock unchanged on payment cancellation before verify
 - [x] Deprecated old endpoints (`/api/lock-by-code`, `/api/machine/{id}/unlock`, etc.) → 410 Gone
 
 ### Phase 2: ESP32 — TFT + QR ✅ COMPLETE

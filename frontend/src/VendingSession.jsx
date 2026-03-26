@@ -78,9 +78,9 @@ export default function VendingSession() {
   const [showFeedback, setShowFeedback] = useState(false);
 
   // Session countdown
-  const [expiresAt, setExpiresAt] = useState(null);
   const [remaining, setRemaining] = useState(0);
   const countdownRef = useRef(null);
+  const phaseRef = useRef(PHASE.LOADING);
 
   // Name entry state
   const [nameSubmitted, setNameSubmitted] = useState(false);
@@ -119,6 +119,58 @@ export default function VendingSession() {
       if (countdownRef.current) clearInterval(countdownRef.current);
     };
   }, []);
+
+  // Keep latest phase in a ref for unmount-only cancellation logic.
+  useEffect(() => {
+    phaseRef.current = phase;
+  }, [phase]);
+
+  // ── Step 2: Claim session ──
+  const claimSession = useCallback(async (name) => {
+    const claimName = name || userName.trim();
+    if (!claimName) return;
+
+    setPhase(PHASE.CLAIMING);
+
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/session/claim`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          session_token: sessionToken,
+          client_id: clientId,
+          name: claimName,
+        }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        if (res.status === 409) {
+          setPhase(PHASE.ERROR);
+          setErrorMessage("This session was already claimed. Please scan the new QR on the machine.");
+          return;
+        }
+        if (res.status === 410) {
+          setPhase(PHASE.EXPIRED);
+          setErrorMessage("This QR code has expired. Please scan the new QR on the machine.");
+          return;
+        }
+        throw new Error(data.message || data.error || "Claim failed");
+      }
+
+      // Success or already_claimed by same user
+      localStorage.setItem("sv_user_name", claimName);
+      startCountdown(data.expires_at);
+      setPhase(PHASE.CLAIMED);
+      setNameSubmitted(true);
+
+    } catch (err) {
+      console.error("Claim error:", err);
+      setPhase(PHASE.ERROR);
+      setErrorMessage(err.message || "Failed to claim session.");
+    }
+  }, [userName, sessionToken, clientId, startCountdown]);
 
   // ── Step 1: Check session status on load (resume on reload) ──
   useEffect(() => {
@@ -177,7 +229,6 @@ export default function VendingSession() {
         if (status.status === "in_progress" && status.is_owner) {
           // Resume: already claimed by this user
           setPhase(PHASE.CLAIMED);
-          setExpiresAt(status.expires_at);
           startCountdown(status.expires_at);
           setNameSubmitted(true);
           return;
@@ -220,55 +271,7 @@ export default function VendingSession() {
 
     init();
     return () => { mounted = false; };
-  }, [machineId, sessionToken, clientId, startCountdown]);
-
-  // ── Step 2: Claim session ──
-  async function claimSession(name) {
-    const claimName = name || userName.trim();
-    if (!claimName) return;
-
-    setPhase(PHASE.CLAIMING);
-
-    try {
-      const res = await fetch(`${BACKEND_URL}/api/session/claim`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          session_token: sessionToken,
-          client_id: clientId,
-          name: claimName,
-        }),
-      });
-
-      const data = await res.json();
-
-      if (!res.ok) {
-        if (res.status === 409) {
-          setPhase(PHASE.ERROR);
-          setErrorMessage("This session was already claimed. Please scan the new QR on the machine.");
-          return;
-        }
-        if (res.status === 410) {
-          setPhase(PHASE.EXPIRED);
-          setErrorMessage("This QR code has expired. Please scan the new QR on the machine.");
-          return;
-        }
-        throw new Error(data.message || data.error || "Claim failed");
-      }
-
-      // Success or already_claimed by same user
-      localStorage.setItem("sv_user_name", claimName);
-      setExpiresAt(data.expires_at);
-      startCountdown(data.expires_at);
-      setPhase(PHASE.CLAIMED);
-      setNameSubmitted(true);
-
-    } catch (err) {
-      console.error("Claim error:", err);
-      setPhase(PHASE.ERROR);
-      setErrorMessage(err.message || "Failed to claim session.");
-    }
-  }
+  }, [machineId, sessionToken, clientId, startCountdown, claimSession]);
 
   // ── Step 3: Create order + Pay ──
   async function handlePayment() {
@@ -302,7 +305,6 @@ export default function VendingSession() {
       }
 
       const order = await orderRes.json();
-      const txId = crypto.randomUUID ? crypto.randomUUID() : "tx-" + Date.now();
 
       // Open Razorpay
       const options = {
@@ -314,22 +316,8 @@ export default function VendingSession() {
         order_id: order.id,
         handler: async function (response) {
           try {
-            // Verify payment
-            const verifyRes = await fetch(`${BACKEND_URL}/verify-payment`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                razorpay_payment_id: response.razorpay_payment_id,
-                razorpay_order_id: order.id,
-                razorpay_signature: response.razorpay_signature,
-              }),
-            });
-
-            if (!verifyRes.ok) {
-              throw new Error("Payment verification failed");
-            }
-
-            // Trigger dispense via session endpoint
+            // Trigger dispense via session endpoint.
+            // Backend verifies Razorpay signature before allowing dispense.
             const dispenseRes = await fetch(`${BACKEND_URL}/api/session/trigger-dispense`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
@@ -337,7 +325,9 @@ export default function VendingSession() {
                 session_token: sessionToken,
                 client_id: clientId,
                 quantity: selectedPads,
-                transaction_id: txId,
+                razorpay_order_id: order.id,
+                razorpay_payment_id: response.razorpay_payment_id,
+                razorpay_signature: response.razorpay_signature,
               }),
             });
 
@@ -346,6 +336,10 @@ export default function VendingSession() {
               if (err.status === "duplicate") {
                 // Already processed — treat as success
                 console.log("Transaction already processed");
+              } else if (err.error === "insufficient_stock") {
+                throw new Error(
+                  `Stock became unavailable before dispense (available: ${err.available ?? 0}). Contact support.`
+                );
               } else {
                 throw new Error(err.error || "Dispense trigger failed");
               }
@@ -386,11 +380,14 @@ export default function VendingSession() {
     }
   }
 
-  // ── Cancel session on leave ──
+  // ── Cancel session only on actual page leave/unmount ──
   useEffect(() => {
     return () => {
-      // Only cancel if claimed and not dispensing/completed
-      if (phase === PHASE.CLAIMED || phase === PHASE.PAYING) {
+      // NOTE:
+      // This effect must not depend on `phase`, otherwise cleanup runs on phase
+      // transitions (e.g. CLAIMED -> PAYING) and cancels a live checkout.
+      const latestPhase = phaseRef.current;
+      if (latestPhase === PHASE.CLAIMED) {
         navigator.sendBeacon?.(
           `${BACKEND_URL}/api/session/cancel`,
           new Blob(
@@ -400,7 +397,7 @@ export default function VendingSession() {
         );
       }
     };
-  }, [phase, sessionToken, clientId]);
+  }, [sessionToken, clientId]);
 
   // ── Auto-dismiss success popup ──
   useEffect(() => {
@@ -598,7 +595,9 @@ export default function VendingSession() {
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ session_token: sessionToken, client_id: clientId }),
                   });
-                } catch { }
+                } catch (err) {
+                  console.debug("Session cancel on leave failed:", err);
+                }
                 navigate("/");
               }}
               className="mt-3 text-sm text-red-500 hover:text-red-700 transition-colors"
