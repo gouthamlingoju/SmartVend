@@ -936,7 +936,7 @@ async def register_machine_session(machine_id: str, api_key: str) -> Dict:
 
     token = new_session.get("session_token")
     base_url = FRONTEND_URL or "https://smartvend.onrender.com"
-    url = f"{base_url}/s/{token}"
+    url = f"{base_url}/vend/{machine_id}/{token}"
 
     # 4. Log event
     await log_event(

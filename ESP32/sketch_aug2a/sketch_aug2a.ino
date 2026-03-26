@@ -1,28 +1,47 @@
 /*
- * SmartVend ESP32 Firmware v3.0 — QR-Based Session System
+ * SmartVend ESP32 Firmware v3.1 — QR-Based Session System
  * ========================================================
- * 
+ *
  * Hardware:
  *   - ESP32 DevKit V1
- *   - 0.96" OLED SSD1306 (128×64px) via I2C (replaces 16×2 LCD)
- *   - L298N Motor Driver (ENA=25, IN1=26, IN2=27)
+ *   - 2.4" ILI9341 TFT LCD (240×320px) — 8-bit parallel interface via UNO shield adapter
+ *   - L298N Motor Driver (ENA=25, IN1=32, IN2=33)
  *   - Current sensor on GPIO34 for jam detection
  *   - Built-in LED on GPIO2
  *
- * v3.0 Changes from v2.0:
- *   - OLED replaces LCD (128×64 px vs 16×2 chars)
- *   - QR code rendered on-device from session URL
- *   - New WS message types: "session", "claimed", "new_session"
- *   - States: IDLE → IN_USE → DISPENSING → COMPLETED (replaces UNLOCKED/LOCKED)
- *   - No more display_code / fetch_display / lock / unlock messages
+ * v3.1 Changes from v3.0:
+ *   - 2.4" ILI9341 TFT (240×320) replaces 0.96" OLED SSD1306 (128×64)
+ *   - Library: TFT_eSPI (configured for ILI9341 8-bit parallel)
+ *   - Fullscreen color UI — green idle, orange in-use, blue dispensing, red error
+ *   - Larger QR code (up to 200×200px on screen)
+ *   - Text is readable from a distance
  *
  * Libraries required (install via Arduino Library Manager):
- *   1. Adafruit SSD1306  (+ Adafruit GFX)
+ *   1. TFT_eSPI  (configure User_Setup.h for ILI9341 8-bit parallel)
  *   2. QRCode by ricmoo  (https://github.com/ricmoo/QRCode)
  *   3. WebSocketsClient
  *   4. ArduinoJson
  *   5. WebServer (built-in)
  *   6. esp_task_wdt (built-in)
+ *
+ * IMPORTANT — TFT_eSPI User_Setup.h config needed:
+ *   #define ILI9341_DRIVER
+ *   #define TFT_PARALLEL_8_BIT
+ *   #define TFT_CS   27
+ *   #define TFT_DC   14
+ *   #define TFT_RST  26
+ *   #define TFT_WR   12
+ *   #define TFT_RD   13
+ *   #define TFT_D0   16
+ *   #define TFT_D1    4
+ *   #define TFT_D2   23
+ *   #define TFT_D3   22
+ *   #define TFT_D4   21
+ *   #define TFT_D5   19
+ *   #define TFT_D6   18
+ *   #define TFT_D7   17
+ *   #define TFT_WIDTH  240
+ *   #define TFT_HEIGHT 320
  */
 
 #include <WiFi.h>
@@ -33,10 +52,8 @@
 #include <WebServer.h>
 #include <esp_task_wdt.h>
 
-// OLED Display
-#include <Wire.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
+// TFT Display (ILI9341 via TFT_eSPI)
+#include <TFT_eSPI.h>
 
 // QR Code generation
 #include "qrcode.h"
@@ -45,7 +62,6 @@
 //  CONFIGURATION
 // ══════════════════════════════════════════════
 
-// WiFi Networks (ordered by preference)
 struct WiFiNetwork {
   const char *ssid;
   const char *password;
@@ -53,8 +69,8 @@ struct WiFiNetwork {
 
 WiFiNetwork networks[] = {
   {"Goutham's Galaxy", "23456789"},
-  {"VNRVJIET_WIFI", "vnrvjiet@123"},
-  {"VNRVJIET_E", "vnrvjiet@123"}
+  {"VNRVJIET_WIFI",    "vnrvjiet@123"},
+  {"VNRVJIET_E",       "vnrvjiet@123"}
 };
 const int networkCount = sizeof(networks) / sizeof(networks[0]);
 
@@ -73,38 +89,51 @@ const char *machine_api_key = "sv_001mmsg";
 // ══════════════════════════════════════════════
 
 // Motor Driver (L298N)
-const int ENA = 25;  // PWM speed
-const int IN1 = 26;  // Direction
-const int IN2 = 27;  // Direction
+const int ENA = 25;
+const int IN1 = 32;
+const int IN2 = 33;
+// NOTE: GPIO26/GPIO27 are reserved for TFT RST/CS in this build.
 
 // LED
 const int LED_BUILTIN_PIN = 2;
 
 // Jam Detection (analog current sensor)
-const int JAM_SENSOR_PIN       = 34;
-const int JAM_CURRENT_THRESHOLD = 800;  // Calibrate per motor
-const int JAM_DURATION_THRESHOLD = 200; // ms sustained
+const int JAM_SENSOR_PIN        = 34;
+const int JAM_CURRENT_THRESHOLD = 800;
+const int JAM_DURATION_THRESHOLD = 200;
 
-// OLED Display (SSD1306 128×64)
-#define SCREEN_WIDTH  128
-#define SCREEN_HEIGHT 64
-#define OLED_RESET    -1  // No reset pin (share ESP32 reset)
-#define OLED_I2C_ADDR 0x3C  // Common SSD1306 address (try 0x3D if needed)
+// TFT Screen dimensions (ILI9341 portrait)
+#define SCREEN_W 240
+#define SCREEN_H 320
+#define QR_VERSION_MIN 8
+#define QR_VERSION_MAX 12
 
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+// ── Colour palette ──────────────────────────
+#define C_BG_IDLE       0x0841   // Deep navy blue
+#define C_BG_INUSE      0xA200   // Deep orange-red
+#define C_BG_DISPENSE   0x0410   // Deep blue-green
+#define C_BG_COMPLETED  0x0480   // Deep green
+#define C_BG_ERROR      0xA000   // Deep red
+#define C_BG_OFFLINE    0x39C7   // Dark slate
+#define C_BG_BOOT       0x18C3   // Very dark blue
+#define C_WHITE         TFT_WHITE
+#define C_ACCENT        0x07FF   // Cyan
+#define C_YELLOW        TFT_YELLOW
+#define C_GREEN         0x07E0
+#define C_ORANGE        TFT_ORANGE
 
 // ══════════════════════════════════════════════
-//  STATE MACHINE (v3.0)
+//  STATE MACHINE
 // ══════════════════════════════════════════════
 
 enum DeviceState {
-  STATE_BOOTING,      // Startup sequence
-  STATE_IDLE,         // Showing QR code, waiting for scan
-  STATE_IN_USE,       // Session claimed, user paying
-  STATE_DISPENSING,   // Motor running
-  STATE_COMPLETED,    // Dispense done, brief "Done!" flash
-  STATE_ERROR,        // Jam or hardware error
-  STATE_OFFLINE       // Backend unreachable
+  STATE_BOOTING,
+  STATE_IDLE,
+  STATE_IN_USE,
+  STATE_DISPENSING,
+  STATE_COMPLETED,
+  STATE_ERROR,
+  STATE_OFFLINE
 };
 
 DeviceState state = STATE_BOOTING;
@@ -113,10 +142,10 @@ DeviceState state = STATE_BOOTING;
 //  GLOBAL VARIABLES
 // ══════════════════════════════════════════════
 
-// Networking
 WebSocketsClient webSocket;
 WebServer server(80);
 WiFiClientSecure secureClient;
+TFT_eSPI tft = TFT_eSPI();
 
 // Session
 String currentSessionToken = "";
@@ -133,287 +162,417 @@ String currentTransactionId     = "";
 unsigned long jamStartTime      = 0;
 
 // Timing constants
-const unsigned long BASE_RUN_TIME       = 4000;   // ms per unit
-const unsigned long LOCK_TIMEOUT        = 600000;  // 10 min local failsafe
-const unsigned long WIFI_CHECK_INTERVAL = 30000;   // 30 sec
-const unsigned long HEARTBEAT_INTERVAL  = 30000;   // 30 sec (reduced from 1s)
-const unsigned long COMMAND_POLL_INTERVAL = 15000;  // 15 sec HTTP fallback
-const unsigned long COMPLETED_FLASH_MS  = 2000;    // 2 sec "Done!" flash
+const unsigned long BASE_RUN_TIME         = 4000;
+const unsigned long LOCK_TIMEOUT          = 600000;
+const unsigned long WIFI_CHECK_INTERVAL   = 30000;
+const unsigned long HEARTBEAT_INTERVAL    = 30000;
+const unsigned long COMMAND_POLL_INTERVAL = 15000;
+const unsigned long COMPLETED_FLASH_MS   = 2000;
 
 // Timing trackers
-unsigned long lastHeartbeat    = 0;
-unsigned long lastCommandPoll  = 0;
-unsigned long lastWiFiCheck    = 0;
-unsigned long stateEnteredAt   = 0;  // When current state was entered
+unsigned long lastHeartbeat      = 0;
+unsigned long lastCommandPoll    = 0;
+unsigned long lastWiFiCheck      = 0;
+unsigned long stateEnteredAt     = 0;
 unsigned long completedFlashStart = 0;
 
-// Manual motor control (web panel)
-int  manualMotorSpeed   = 200;
+// Manual motor (web panel)
+int  manualMotorSpeed  = 200;
 bool manualMotorControl = false;
 
-// Display state cache (for web panel)
+// Display cache (for web panel JSON)
 String displayLine1 = "";
 String displayLine2 = "";
 
-// QR Code bitmap cache (avoid regenerating every frame)
-bool qrBitmapValid = false;
-uint8_t qrBitmapData[64 * 64 / 8];  // 64×64 monochrome bitmap
-
 // ══════════════════════════════════════════════
-//  OLED DISPLAY FUNCTIONS
+//  TFT HELPER UTILITIES
 // ══════════════════════════════════════════════
 
-// Reusable header — always shows "SmartVend" + divider at top (14px)
-void drawHeader() {
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(28, 2);
-  display.print("SmartVend");
-  display.drawLine(0, 12, 127, 12, SSD1306_WHITE);
+// Draw a centered string at a given y, with given text size and color
+void drawCentered(const char *text, int y, uint8_t sz, uint16_t color) {
+  tft.setTextSize(sz);
+  tft.setTextColor(color, tft.textcolor);  // transparent bg workaround
+  // Calculate pixel width: each char is 6*sz pixels wide
+  int txtW = strlen(text) * 6 * sz;
+  int x = (SCREEN_W - txtW) / 2;
+  if (x < 0) x = 0;
+  tft.setCursor(x, y);
+  tft.print(text);
 }
 
-void displayBootScreen(const char* statusText) {
-  display.clearDisplay();
-  drawHeader();
-  
-  // Status text centered below header
-  display.setTextSize(1);
-  int16_t x1, y1;
-  uint16_t w, h;
-  display.getTextBounds(statusText, 0, 0, &x1, &y1, &w, &h);
-  display.setCursor((SCREEN_WIDTH - w) / 2, 34);
-  display.print(statusText);
-  
-  display.display();
-  
-  // Cache for web panel
+// Draw a reusable header bar at the top (50px tall)
+void drawHeader(uint16_t bgColor) {
+  tft.fillRect(0, 0, SCREEN_W, 50, C_ACCENT);
+  tft.setTextColor(TFT_BLACK);
+  tft.setTextSize(3);
+  int txtW = 9 * 6 * 3;  // "SmartVend" = 9 chars
+  tft.setCursor((SCREEN_W - txtW) / 2, 12);
+  tft.print("SmartVend");
+  // Divider at y=50
+  tft.drawLine(0, 50, SCREEN_W, 50, TFT_WHITE);
+}
+
+// Draw footer bar at the bottom (30px)
+void drawFooter(const char *text, uint16_t bgColor) {
+  tft.fillRect(0, SCREEN_H - 30, SCREEN_W, 30, bgColor);
+  tft.drawLine(0, SCREEN_H - 30, SCREEN_W, SCREEN_H - 30, TFT_WHITE);
+  tft.setTextColor(TFT_WHITE);
+  tft.setTextSize(1);
+  int txtW = strlen(text) * 6;
+  tft.setCursor((SCREEN_W - txtW) / 2, SCREEN_H - 18);
+  tft.print(text);
+}
+
+// Helper: centered text with background fill (avoids flicker on partial updates)
+void drawCenteredBg(const char *text, int y, uint8_t sz, uint16_t color, uint16_t bg) {
+  int txtW = strlen(text) * 6 * sz;
+  int txtH = 8 * sz;
+  int x = (SCREEN_W - txtW) / 2;
+  if (x < 0) x = 0;
+  tft.fillRect(0, y, SCREEN_W, txtH + 4, bg);
+  tft.setTextColor(color);
+  tft.setTextSize(sz);
+  tft.setCursor(x, y + 2);
+  tft.print(text);
+}
+
+// ══════════════════════════════════════════════
+//  DISPLAY FUNCTIONS
+// ══════════════════════════════════════════════
+
+void displayBootScreen(const char *statusText) {
+  tft.fillScreen(C_BG_BOOT);
+  drawHeader(C_BG_BOOT);
+
+  // Big "SmartVend" label area
+  tft.setTextColor(C_ACCENT);
+  tft.setTextSize(2);
+  int txtW = 9 * 6 * 2;
+  tft.setCursor((SCREEN_W - txtW) / 2, 90);
+  tft.print("SmartVend");
+
+  // "v3.1" subtitle
+  tft.setTextColor(TFT_DARKGREY);
+  tft.setTextSize(1);
+  tft.setCursor((SCREEN_W - 6 * 4) / 2, 115);
+  tft.print("v3.1");
+
+  // Divider
+  tft.drawLine(20, 140, SCREEN_W - 20, 140, TFT_DARKGREY);
+
+  // Status text
+  tft.setTextColor(C_WHITE);
+  tft.setTextSize(2);
+  int stW = strlen(statusText) * 6 * 2;
+  tft.setCursor((SCREEN_W - stW) / 2, 170);
+  tft.print(statusText);
+
+  // Spinner dots
+  static uint8_t dotFrame = 0;
+  dotFrame = (dotFrame + 1) % 4;
+  tft.setCursor((SCREEN_W / 2) - 18, 200);
+  tft.setTextColor(C_ACCENT);
+  for (int i = 0; i < 3; i++) {
+    tft.print(i < (int)dotFrame ? "." : " ");
+  }
+
+  drawFooter(machine_id, C_BG_BOOT);
+
   displayLine1 = "SmartVend";
   displayLine2 = String(statusText);
-  
-  Serial.printf("[OLED] Boot: %s\n", statusText);
+  Serial.printf("[TFT] Boot: %s\n", statusText);
 }
 
-void displayQRCode(const char* url) {
-  display.clearDisplay();
-  // Fill entire screen with WHITE to act as glowing background
-  display.fillRect(0, 0, 128, 64, SSD1306_WHITE);
+void displayQRCode(const char *url) {
+  tft.fillScreen(TFT_WHITE);
 
-  // Reduce contrast to fix intense blue camera glare
-  display.ssd1306_command(SSD1306_SETCONTRAST);
-  display.ssd1306_command(0x3F); // 25% brightness
+  // Draw header on white background with dark text
+  tft.fillRect(0, 0, SCREEN_W, 50, 0x39C7);  // dark header on white screen
+  tft.setTextColor(TFT_WHITE);
+  tft.setTextSize(3);
+  int hW = 9 * 6 * 3;
+  tft.setCursor((SCREEN_W - hW) / 2, 12);
+  tft.print("SmartVend");
+  tft.drawLine(0, 50, SCREEN_W, 50, TFT_BLACK);
 
-  // Strip https:// to shorten payload
-  // This will force the QR size to Version 2 (25x25) returning modules to 2px.
-  // 3px minimum optical clarity will be achieved when the larger display is swapped in.
-  const char* qrText = url;
-  if (strncmp(qrText, "https://", 8) == 0) qrText += 8;
-  else if (strncmp(qrText, "http://", 7) == 0) qrText += 7;
+  // Right-side labels
+  tft.setTextColor(TFT_BLACK);
+  tft.setTextSize(2);
+  tft.setCursor(5, 60);
+  tft.print("Scan Me");
 
-  // ── KEY CHANGE 1: Use ECC_LOW to get smallest possible QR ──
-  // Clean OLED display doesn't need high redundancy
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_DARKGREY);
+  tft.setCursor(5, 80);
+  tft.print(machine_id);
+  tft.setCursor(5, 92);
+  tft.print(currentSessionToken.substring(0, 8).c_str());
+
+  // Keep full URL payload exactly as provided by backend (no shortening).
+  String qrText = String(url ? url : "");
+  if (qrText.length() == 0) {
+    tft.setTextColor(TFT_RED);
+    tft.setTextSize(2);
+    tft.setCursor(10, 150);
+    tft.print("QR URL Error!");
+    return;
+  }
+
+  // Generate QR code — force higher QR version for denser code.
   QRCode qrcode;
-  uint8_t qrcodeData[qrcode_getBufferSize(10)];
+  uint8_t qrcodeData[qrcode_getBufferSize(QR_VERSION_MAX)];
 
   int qrResult = -1;
-  int version = 1;
-  while (version <= 10) {
-    qrResult = qrcode_initText(&qrcode, qrcodeData, version, ECC_LOW, qrText);
+  int version = QR_VERSION_MIN;
+  while (version <= QR_VERSION_MAX) {
+    qrResult = qrcode_initText(&qrcode, qrcodeData, version, ECC_LOW, qrText.c_str());
     if (qrResult == 0) break;
     version++;
   }
 
   if (qrResult != 0) {
-    display.setCursor(0, 30);
-    display.print("QR Error");
-    display.display();
+    tft.setTextColor(TFT_RED);
+    tft.setTextSize(2);
+    tft.setCursor(10, 150);
+    tft.print("QR Error!");
     return;
   }
 
-  // ── KEY CHANGE 2: Use full 64px for QR, scale as large as possible ──
-  uint8_t moduleSize = 64 / qrcode.size;
+  // Scale QR to fit a 200×200 area (centered horizontally, y from 55)
+  uint8_t maxQRSize = 200;
+  uint8_t moduleSize = maxQRSize / qrcode.size;
   if (moduleSize < 1) moduleSize = 1;
+
   uint8_t qrPixelSize = qrcode.size * moduleSize;
+  uint8_t offsetX = (SCREEN_W - qrPixelSize) / 2;
+  uint8_t offsetY = 58 + (210 - qrPixelSize) / 2;  // centered in y=58..268
 
-  // ── KEY CHANGE: Center QR horizontally and vertically ──
-  // The OLED is 128px wide by 64px tall. Since the QR code is a square, 
-  // its maximum size is bounded by the 64px height.
-  uint8_t offsetX = (128 - qrPixelSize) / 2;  // CENTER horizontally
-  uint8_t offsetY = (64  - qrPixelSize) / 2;  // CENTER vertically
+  // Draw white quiet zone behind QR
+  int quietZone = moduleSize * 2;
+  tft.fillRect(offsetX - quietZone, offsetY - quietZone,
+               qrPixelSize + quietZone * 2, qrPixelSize + quietZone * 2,
+               TFT_WHITE);
 
-  // ── KEY CHANGE 5: Draw BLACK modules on WHITE background ──
-  // Black-on-white is the standard QR orientation. The screen is already white.
+  // Render QR modules: dark (true) = black pixel
   for (uint8_t y = 0; y < qrcode.size; y++) {
     for (uint8_t x = 0; x < qrcode.size; x++) {
-      if (qrcode_getModule(&qrcode, x, y)) {  // Corrected: true = dark module
-        display.fillRect(
-          offsetX + x * moduleSize,
-          offsetY + y * moduleSize,
-          moduleSize,
-          moduleSize,
-          SSD1306_BLACK
-        );
-      }
+      uint16_t color = qrcode_getModule(&qrcode, x, y) ? TFT_BLACK : TFT_WHITE;
+      tft.fillRect(offsetX + x * moduleSize,
+                   offsetY + y * moduleSize,
+                   moduleSize, moduleSize, color);
     }
   }
 
-  // Draw tiny ID in bottom-left corner to avoid overlapping the centered QR code
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_BLACK); // Dark text on bright background
-  display.setCursor(0, 56); 
-  display.print(machine_id);
+  // Footer
+  drawFooter("SmartVend — Tap to Pay", TFT_DARKGREY);
 
-  // You can also put the 4-char code in the top-left corner
-  display.setCursor(0, 0); 
-  display.print(currentSessionToken);
-
-  display.display();
-
-  // Cache for web panel
   displayLine1 = "SmartVend";
   displayLine2 = String("QR: ") + currentSessionToken;
-
-  Serial.printf("[OLED] QR v%d, %dx%d modules, scale=%dpx\n", 
+  Serial.printf("[TFT] QR v%d, %dx%d modules, scale=%dpx\n",
                 version, qrcode.size, qrcode.size, moduleSize);
 }
 
-void displayInUse(const char* userName) {
-  display.clearDisplay();
-  drawHeader();
-  
-  // "IN USE" below header
-  display.setTextSize(2);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(18, 16);
-  display.print("IN USE");
-  
+void displayInUse(const char *userName) {
+  tft.fillScreen(C_BG_INUSE);
+  drawHeader(C_BG_INUSE);
+
+  // Big "IN USE" text
+  tft.setTextColor(C_WHITE);
+  tft.setTextSize(4);
+  int iuW = 6 * 6 * 4;  // "IN USE"
+  tft.setCursor((SCREEN_W - iuW) / 2, 75);
+  tft.print("IN USE");
+
+  // Divider
+  tft.drawLine(20, 130, SCREEN_W - 20, 130, TFT_WHITE);
+
+  // Icon placeholder (person icon using rectangle)
+  tft.fillRoundRect(SCREEN_W/2 - 20, 140, 40, 40, 20, TFT_WHITE);
+  tft.fillCircle(SCREEN_W/2, 136, 14, TFT_WHITE);
+
   // User name
-  display.setTextSize(1);
-  display.setCursor(10, 38);
-  display.print("User: ");
-  display.print(userName);
-  
+  tft.setTextColor(C_YELLOW);
+  tft.setTextSize(2);
+  int uW = strlen(userName) * 6 * 2;
+  tft.setCursor((SCREEN_W - uW) / 2, 200);
+  tft.print(userName);
+
   // Status
-  display.setCursor(10, 52);
-  display.print("Processing payment...");
-  
-  display.display();
-  
+  tft.setTextColor(C_WHITE);
+  tft.setTextSize(1);
+  const char *status = "Processing payment...";
+  int sW = strlen(status) * 6;
+  tft.setCursor((SCREEN_W - sW) / 2, 230);
+  tft.print(status);
+
+  drawFooter(machine_id, C_BG_INUSE);
+
   displayLine1 = "SmartVend";
   displayLine2 = String("IN USE - ") + userName;
-  
-  Serial.printf("[OLED] In Use - %s\n", userName);
+  Serial.printf("[TFT] In Use - %s\n", userName);
 }
 
 void displayDispensing(unsigned long quantity) {
-  display.clearDisplay();
-  drawHeader();
-  
-  // "Dispensing" text below header
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(20, 16);
-  display.print("Dispensing");
-  
-  // Animated dots effect
+  // Only clear background once per dispense cycle, then update bar
+  static bool dispensingInit = false;
+  if (!dispensingInit || state != STATE_DISPENSING) {
+    dispensingInit = true;
+    tft.fillScreen(C_BG_DISPENSE);
+    drawHeader(C_BG_DISPENSE);
+
+    tft.setTextColor(C_WHITE);
+    tft.setTextSize(3);
+    int dW = 10 * 6 * 3;  // "Dispensing"
+    tft.setCursor((SCREEN_W - dW) / 2, 75);
+    tft.print("Dispensing");
+
+    // Quantity label
+    tft.setTextSize(2);
+    tft.setTextColor(C_YELLOW);
+    char buf[32];
+    snprintf(buf, sizeof(buf), "Qty: %lu", quantity);
+    int qW = strlen(buf) * 6 * 2;
+    tft.setCursor((SCREEN_W - qW) / 2, 125);
+    tft.print(buf);
+
+    // Progress bar border
+    tft.drawRoundRect(20, 220, SCREEN_W - 40, 30, 6, TFT_WHITE);
+
+    drawFooter(machine_id, C_BG_DISPENSE);
+  }
+
+  // Animate progress bar
+  unsigned long elapsed = millis() - motorStartTime;
+  float progress = motorRunDuration > 0 ? (float)elapsed / (float)motorRunDuration : 0;
+  if (progress > 1.0f) progress = 1.0f;
+
+  int barMax = SCREEN_W - 44;
+  int barFill = (int)(barMax * progress);
+  tft.fillRect(22, 222, barMax, 26, C_BG_DISPENSE);   // clear bar area
+  if (barFill > 0) {
+    tft.fillRoundRect(22, 222, barFill, 26, 4, C_ACCENT);  // fill
+  }
+
+  // Animated dots (update in place)
   static uint8_t dotFrame = 0;
   dotFrame = (dotFrame + 1) % 4;
-  for (int i = 0; i < dotFrame; i++) display.print(".");
-  
-  // Quantity
-  display.setCursor(20, 28);
-  display.printf("Qty: %lu", quantity);
-  
-  // Progress bar area
-  display.drawRect(10, 42, 108, 12, SSD1306_WHITE);
-  
-  // Calculate progress
-  unsigned long elapsed = millis() - motorStartTime;
-  float progress = (float)elapsed / (float)motorRunDuration;
-  if (progress > 1.0) progress = 1.0;
-  display.fillRect(12, 44, (int)(104 * progress), 8, SSD1306_WHITE);
-  
-  display.display();
-  
+  tft.fillRect(20, 270, SCREEN_W - 40, 16, C_BG_DISPENSE);
+  tft.setTextColor(C_WHITE);
+  tft.setTextSize(2);
+  // Percentage
+  char pct[8];
+  snprintf(pct, sizeof(pct), "%d%%", (int)(progress * 100));
+  int pW = strlen(pct) * 6 * 2;
+  tft.setCursor((SCREEN_W - pW) / 2, 270);
+  tft.print(pct);
+
   displayLine1 = "SmartVend";
   displayLine2 = String("Dispensing Qty: ") + String(quantity);
 }
 
 void displayCompleted() {
-  display.clearDisplay();
-  drawHeader();
-  
-  // "Done!" below header
-  display.setTextSize(2);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(24, 16);
-  display.print("Done!");
-  
-  // Draw a checkmark
-  display.drawLine(45, 38, 55, 48, SSD1306_WHITE);
-  display.drawLine(55, 48, 75, 28, SSD1306_WHITE);
-  display.drawLine(46, 38, 56, 48, SSD1306_WHITE);
-  display.drawLine(56, 48, 76, 28, SSD1306_WHITE);
-  
-  display.setTextSize(1);
-  display.setCursor(22, 55);
-  display.print("Thank you!");
-  
-  display.display();
-  
+  tft.fillScreen(C_BG_COMPLETED);
+  drawHeader(C_BG_COMPLETED);
+
+  // Big checkmark using lines
+  tft.drawLine(70,  175, 110, 215, TFT_WHITE);
+  tft.drawLine(71,  175, 111, 215, TFT_WHITE);
+  tft.drawLine(72,  175, 112, 215, TFT_WHITE);
+  tft.drawLine(110, 215, 175, 145, TFT_WHITE);
+  tft.drawLine(111, 215, 176, 145, TFT_WHITE);
+  tft.drawLine(112, 215, 177, 145, TFT_WHITE);
+
+  // "Done!" text
+  tft.setTextColor(C_WHITE);
+  tft.setTextSize(4);
+  int dW = 5 * 6 * 4;  // "Done!"
+  tft.setCursor((SCREEN_W - dW) / 2, 80);
+  tft.print("Done!");
+
+  // Thank you text
+  tft.setTextColor(C_YELLOW);
+  tft.setTextSize(2);
+  int tW = 10 * 6 * 2;  // "Thank you!"
+  tft.setCursor((SCREEN_W - tW) / 2, 240);
+  tft.print("Thank you!");
+
+  drawFooter("Come again!", C_BG_COMPLETED);
+
   displayLine1 = "SmartVend";
   displayLine2 = "Done! Thank you!";
-  
-  Serial.println("[OLED] Completed");
+  Serial.println("[TFT] Completed");
 }
 
-void displayError(const char* errorMsg) {
-  display.clearDisplay();
-  drawHeader();
-  
-  // "ERROR!" below header
-  display.setTextSize(2);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(18, 16);
-  display.print("ERROR!");
-  
-  display.setTextSize(1);
-  display.setCursor(5, 38);
-  display.print(errorMsg);
-  
-  display.setCursor(5, 52);
-  display.print("Contact support");
-  
-  display.display();
-  
+void displayError(const char *errorMsg) {
+  tft.fillScreen(C_BG_ERROR);
+  drawHeader(C_BG_ERROR);
+
+  // "!" icon
+  tft.fillRect(SCREEN_W/2 - 6, 70, 12, 60, TFT_WHITE);
+  tft.fillRect(SCREEN_W/2 - 6, 140, 12, 12, TFT_WHITE);
+
+  tft.setTextColor(C_WHITE);
+  tft.setTextSize(3);
+  int eW = 6 * 6 * 3;  // "ERROR!"
+  tft.setCursor((SCREEN_W - eW) / 2, 80);
+  tft.print("ERROR!");
+
+  // Error message (smaller)
+  tft.setTextColor(C_YELLOW);
+  tft.setTextSize(2);
+  int mW = strlen(errorMsg) * 6 * 2;
+  if (mW > SCREEN_W) { tft.setTextSize(1); mW = strlen(errorMsg) * 6; }
+  tft.setCursor((SCREEN_W - mW) / 2, 175);
+  tft.print(errorMsg);
+
+  tft.setTextColor(C_WHITE);
+  tft.setTextSize(1);
+  const char *support = "Contact support";
+  int supW = strlen(support) * 6;
+  tft.setCursor((SCREEN_W - supW) / 2, 210);
+  tft.print(support);
+
+  drawFooter(machine_id, C_BG_ERROR);
+
   displayLine1 = "SmartVend";
   displayLine2 = String("ERROR: ") + errorMsg;
-  
-  Serial.printf("[OLED] Error: %s\n", errorMsg);
+  Serial.printf("[TFT] Error: %s\n", errorMsg);
 }
 
 void displayOffline() {
-  display.clearDisplay();
-  drawHeader();
-  
-  // "Offline" below header
-  display.setTextSize(2);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(16, 18);
-  display.print("Offline");
-  
-  display.setTextSize(1);
-  display.setCursor(10, 42);
-  display.print("Server unreachable");
-  
-  display.setCursor(10, 55);
-  display.print("Reconnecting...");
-  
-  display.display();
-  
+  tft.fillScreen(C_BG_OFFLINE);
+  drawHeader(C_BG_OFFLINE);
+
+  // WiFi icon (3 arcs approximation)
+  int cx = SCREEN_W / 2;
+  tft.drawCircle(cx, 145, 45, TFT_DARKGREY);
+  tft.drawCircle(cx, 145, 30, TFT_DARKGREY);
+  tft.drawCircle(cx, 145, 15, TFT_WHITE);
+  // Cross through wifi icon
+  tft.drawLine(cx - 40, 105, cx + 40, 185, TFT_RED);
+  tft.drawLine(cx - 41, 105, cx + 41, 185, TFT_RED);
+
+  tft.setTextColor(C_WHITE);
+  tft.setTextSize(2);
+  int oW = 7 * 6 * 2;  // "Offline"
+  tft.setCursor((SCREEN_W - oW) / 2, 200);
+  tft.print("Offline");
+
+  tft.setTextColor(TFT_DARKGREY);
+  tft.setTextSize(1);
+  const char *rec = "Server unreachable";
+  tft.setCursor((SCREEN_W - (int)strlen(rec) * 6) / 2, 228);
+  tft.print(rec);
+
+  const char *retry = "Reconnecting...";
+  tft.setCursor((SCREEN_W - (int)strlen(retry) * 6) / 2, 244);
+  tft.print(retry);
+
+  drawFooter(machine_id, C_BG_OFFLINE);
+
   displayLine1 = "SmartVend";
   displayLine2 = "Offline - Reconnecting";
-  
-  Serial.println("[OLED] Offline");
+  Serial.println("[TFT] Offline");
 }
 
 // ══════════════════════════════════════════════
@@ -431,13 +590,13 @@ void motorStop() {
 void motorRunForward(unsigned long durationMs) {
   digitalWrite(IN1, HIGH);
   digitalWrite(IN2, LOW);
-  analogWrite(ENA, 200);  // Adjust speed 0–255
+  analogWrite(ENA, 200);
   digitalWrite(LED_BUILTIN_PIN, HIGH);
-  
+
   motorRunning     = true;
   motorStartTime   = millis();
   motorRunDuration = durationMs;
-  
+
   Serial.printf("[Motor] Running for %lu ms\n", durationMs);
 }
 
@@ -450,7 +609,6 @@ void sendRegister() {
   doc["type"]       = "register";
   doc["machine_id"] = machine_id;
   doc["api_key"]    = machine_api_key;
-  
   String message;
   serializeJson(doc, message);
   webSocket.sendTXT(message);
@@ -479,10 +637,8 @@ void sendConfirmation(unsigned long dispensed_qty) {
     Serial.println("[HTTP] WiFi disconnected, cannot confirm");
     return;
   }
-
   HTTPClient http;
-  secureClient.setInsecure();  // TODO: pin CA for production
-
+  secureClient.setInsecure();
   String url = String(serverHttps) + "/api/machine/" + machine_id + "/confirm";
   http.begin(secureClient, url);
   http.addHeader("Content-Type", "application/json");
@@ -491,7 +647,6 @@ void sendConfirmation(unsigned long dispensed_qty) {
   StaticJsonDocument<200> doc;
   doc["transaction_id"] = currentTransactionId;
   doc["dispensed"]      = dispensed_qty;
-
   String requestBody;
   serializeJson(doc, requestBody);
 
@@ -499,15 +654,6 @@ void sendConfirmation(unsigned long dispensed_qty) {
   if (httpCode > 0) {
     String response = http.getString();
     Serial.printf("[HTTP] Confirm: %d — %s\n", httpCode, response.c_str());
-    
-    // Parse response for new session token
-    StaticJsonDocument<512> respDoc;
-    if (deserializeJson(respDoc, response) == DeserializationError::Ok) {
-      if (respDoc.containsKey("new_session_token")) {
-        // Server already sent new_session via WS, but this is a fallback
-        Serial.println("[HTTP] Got new session token via confirm response");
-      }
-    }
   } else {
     Serial.printf("[HTTP] Confirm error: %d\n", httpCode);
   }
@@ -515,7 +661,7 @@ void sendConfirmation(unsigned long dispensed_qty) {
 }
 
 // ══════════════════════════════════════════════
-//  WEBSOCKET EVENT HANDLER (v3.0)
+//  WEBSOCKET EVENT HANDLER
 // ══════════════════════════════════════════════
 
 void webSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
@@ -537,7 +683,6 @@ void webSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
 
     case WStype_TEXT: {
       Serial.printf("[WS] Received: %s\n", payload);
-
       StaticJsonDocument<512> doc;
       DeserializationError error = deserializeJson(doc, payload);
       if (error) {
@@ -548,109 +693,81 @@ void webSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
       const char *msgType = doc["type"];
       if (!msgType) return;
 
-      // ── SESSION: New active session (on register or after QR rotation) ──
       if (strcmp(msgType, "session") == 0) {
         const char *token = doc["token"];
         const char *url   = doc["url"];
-        
         if (token && url) {
           currentSessionToken = String(token);
           currentSessionUrl   = String(url);
-          if (doc.containsKey("expires_at")) {
+          if (doc.containsKey("expires_at"))
             currentExpiresAt = doc["expires_at"].as<String>();
-          }
-          
           state = STATE_IDLE;
           stateEnteredAt = millis();
           claimedByName = "";
-          
-          // Render QR code on OLED
           displayQRCode(url);
-          
           Serial.printf("[Session] New session: %s\n", token);
         }
       }
 
-      // ── CLAIMED: User scanned QR → session is IN_PROGRESS ──
       else if (strcmp(msgType, "claimed") == 0) {
-        const char *name = doc.containsKey("claimed_by_name") 
-          ? doc["claimed_by_name"].as<const char*>() 
+        const char *name = doc.containsKey("claimed_by_name")
+          ? doc["claimed_by_name"].as<const char*>()
           : "User";
-        
         claimedByName = String(name);
         state = STATE_IN_USE;
         stateEnteredAt = millis();
-        
-        // Switch OLED from QR to "In Use" display
         displayInUse(name);
-        
         Serial.printf("[Session] Claimed by: %s\n", name);
       }
 
-      // ── NEW_SESSION: After completion/expiry, render new QR ──
       else if (strcmp(msgType, "new_session") == 0) {
         const char *token = doc["token"];
         const char *url   = doc["url"];
-        
         if (token && url) {
           currentSessionToken = String(token);
           currentSessionUrl   = String(url);
-          if (doc.containsKey("expires_at")) {
+          if (doc.containsKey("expires_at"))
             currentExpiresAt = doc["expires_at"].as<String>();
-          }
-          
           state = STATE_IDLE;
           stateEnteredAt = millis();
           claimedByName = "";
-          
           displayQRCode(url);
-          
           Serial.printf("[Session] Renewed: %s\n", token);
         }
       }
 
-      // ── COMMAND: Dispense ──
       else if (strcmp(msgType, "command") == 0) {
         const char *action = doc["action"];
-        
-        if (action && strcmp(action, "dispense") == 0 && 
+        if (action && strcmp(action, "dispense") == 0 &&
             (state == STATE_IN_USE || state == STATE_IDLE)) {
-          
           currentTransactionId = doc["transaction_id"].as<String>();
           dispenseQuantity     = doc["duration"].as<unsigned long>();
-          
           unsigned long duration = 0;
-          if (doc.containsKey("duration_sec")) {
+          if (doc.containsKey("duration_sec"))
             duration = doc["duration_sec"].as<unsigned long>() * 1000UL;
-          } else if (doc.containsKey("duration")) {
+          else if (doc.containsKey("duration"))
             duration = doc["duration"].as<unsigned long>() * BASE_RUN_TIME;
-          } else {
+          else
             duration = BASE_RUN_TIME;
-          }
-          
+
           state = STATE_DISPENSING;
           stateEnteredAt = millis();
-          
           displayDispensing(dispenseQuantity);
           motorRunForward(duration);
-          
           Serial.printf("[Dispense] qty=%lu, duration=%lums, tx=%s\n",
                         dispenseQuantity, duration, currentTransactionId.c_str());
         }
       }
 
-      // ── PING: Server keepalive → respond with pong ──
       else if (strcmp(msgType, "ping") == 0) {
         sendPong();
       }
 
-      // ── STOCK_UPDATE: Informational ──
       else if (strcmp(msgType, "stock_update") == 0) {
         int stock = doc["stock"] | -1;
         Serial.printf("[Stock] Updated to: %d\n", stock);
       }
 
-      // ── ERROR: Server-side error ──
       else if (strcmp(msgType, "error") == 0) {
         const char *errMsg = doc["error"] | "unknown";
         Serial.printf("[WS] Server error: %s\n", errMsg);
@@ -661,14 +778,10 @@ void webSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
         }
       }
 
-      // ── LEGACY: display_code (backward compat, ignore in v3.0) ──
-      else if (strcmp(msgType, "display_code") == 0) {
-        Serial.println("[WS] Ignoring legacy display_code message");
-      }
-
-      // ── LEGACY: lock/unlock (backward compat, ignore in v3.0) ──
-      else if (strcmp(msgType, "lock") == 0 || strcmp(msgType, "unlock") == 0) {
-        Serial.printf("[WS] Ignoring legacy %s message\n", msgType);
+      else if (strcmp(msgType, "display_code") == 0 ||
+               strcmp(msgType, "lock") == 0 ||
+               strcmp(msgType, "unlock") == 0) {
+        Serial.printf("[WS] Ignoring legacy message: %s\n", msgType);
       }
 
       else {
@@ -706,7 +819,7 @@ void connectToBestWiFi() {
   }
 
   if (bestNetwork >= 0) {
-    Serial.printf("[WiFi] Connecting to: %s (RSSI: %d)\n", 
+    Serial.printf("[WiFi] Connecting to: %s (RSSI: %d)\n",
                   networks[bestNetwork].ssid, bestRSSI);
     WiFi.begin(networks[bestNetwork].ssid, networks[bestNetwork].password);
     unsigned long wifiStart = millis();
@@ -740,12 +853,9 @@ bool waitForHealth() {
     }
     unsigned long backoff = 500 * (attempt + 1);
     Serial.printf("[Health] Retry %d in %lums\n", attempt + 1, backoff);
-    
-    // Show retry on OLED
     char msg[32];
     snprintf(msg, sizeof(msg), "Retry %d/5...", attempt + 1);
     displayBootScreen(msg);
-    
     delay(backoff);
     esp_task_wdt_reset();
   }
@@ -753,14 +863,14 @@ bool waitForHealth() {
 }
 
 // ══════════════════════════════════════════════
-//  WEB CONTROL PANEL (updated for v3.0)
+//  WEB CONTROL PANEL
 // ══════════════════════════════════════════════
 
 void handleRoot() {
   String html = R"rawliteral(
 <!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>SmartVend v3.0 Control</title>
+<title>SmartVend v3.1 Control</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:'Segoe UI',sans-serif;background:linear-gradient(135deg,#667eea,#764ba2);
@@ -769,8 +879,8 @@ min-height:100vh;padding:20px;display:flex;justify-content:center;align-items:ce
 h1{color:#333;margin-bottom:20px;text-align:center;font-size:24px}
 .s{background:#f5f5f5;border-radius:15px;padding:15px;margin-bottom:20px;border:2px solid #e0e0e0}
 .st{font-size:16px;font-weight:bold;color:#555;margin-bottom:10px;text-align:center}
-.oled{background:#000;color:#0f0;font-family:'Courier New',monospace;padding:15px;border-radius:10px;
-text-align:center;margin-bottom:10px;box-shadow:inset 0 2px 10px rgba(0,0,0,.5);min-height:80px}
+.tft{background:#001f3f;color:#00d4ff;font-family:'Courier New',monospace;padding:15px;
+border-radius:10px;text-align:center;margin-bottom:10px;box-shadow:inset 0 2px 10px rgba(0,0,0,.5);min-height:80px}
 .ol{font-size:16px;margin:4px 0;min-height:20px}
 .si{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}
 .si div{background:#fff;padding:8px;border-radius:8px;text-align:center}
@@ -784,9 +894,9 @@ transition:all .3s;text-transform:uppercase;letter-spacing:1px}
 button:hover{transform:translateY(-2px);box-shadow:0 5px 15px rgba(0,0,0,.2)}
 .bs{background:linear-gradient(135deg,#27ae60,#2ecc71);color:#fff}
 .bp{background:linear-gradient(135deg,#e74c3c,#c0392b);color:#fff}
-</style></head><body><div class="c"><h1>SmartVend v3.0</h1>
-<div class="s"><div class="st">OLED Display</div>
-<div class="oled"><div class="ol" id="l1">----</div><div class="ol" id="l2">----</div></div>
+</style></head><body><div class="c"><h1>SmartVend v3.1</h1>
+<div class="s"><div class="st">TFT Display (2.4" ILI9341)</div>
+<div class="tft"><div class="ol" id="l1">----</div><div class="ol" id="l2">----</div></div>
 <div class="si">
 <div><div class="sl">State</div><div class="sv" id="st">BOOTING</div></div>
 <div><div class="sl">Motor</div><div class="sv" id="mt">STOPPED</div></div>
@@ -817,42 +927,37 @@ setInterval(u,1000);u();
 
 void handleStatus() {
   StaticJsonDocument<300> doc;
-  doc["line1"]  = displayLine1;
-  doc["line2"]  = displayLine2;
-  doc["motor"]  = motorRunning;
-  doc["speed"]  = manualMotorSpeed;
-  doc["token"]  = currentSessionToken;
+  doc["line1"]     = displayLine1;
+  doc["line2"]     = displayLine2;
+  doc["motor"]     = motorRunning;
+  doc["speed"]     = manualMotorSpeed;
+  doc["token"]     = currentSessionToken;
   doc["machineId"] = machine_id;
-  
-  // State name
   switch (state) {
-    case STATE_BOOTING:   doc["state"] = "BOOTING"; break;
-    case STATE_IDLE:      doc["state"] = "IDLE"; break;
-    case STATE_IN_USE:    doc["state"] = "IN_USE"; break;
+    case STATE_BOOTING:    doc["state"] = "BOOTING";    break;
+    case STATE_IDLE:       doc["state"] = "IDLE";       break;
+    case STATE_IN_USE:     doc["state"] = "IN_USE";     break;
     case STATE_DISPENSING: doc["state"] = "DISPENSING"; break;
-    case STATE_COMPLETED: doc["state"] = "COMPLETED"; break;
-    case STATE_ERROR:     doc["state"] = "ERROR"; break;
-    case STATE_OFFLINE:   doc["state"] = "OFFLINE"; break;
+    case STATE_COMPLETED:  doc["state"] = "COMPLETED";  break;
+    case STATE_ERROR:      doc["state"] = "ERROR";      break;
+    case STATE_OFFLINE:    doc["state"] = "OFFLINE";    break;
   }
-  
   String response;
   serializeJson(doc, response);
   server.send(200, "application/json", response);
 }
 
 void handleMotorStart() {
-  if (server.hasArg("speed")) {
+  if (server.hasArg("speed"))
     manualMotorSpeed = constrain(server.arg("speed").toInt(), 0, 255);
-  }
   digitalWrite(IN1, HIGH);
   digitalWrite(IN2, LOW);
   analogWrite(ENA, manualMotorSpeed);
   digitalWrite(LED_BUILTIN_PIN, HIGH);
   motorRunning = true;
   motorStartTime = millis();
-  motorRunDuration = 0;  // Continuous until stopped
+  motorRunDuration = 0;
   manualMotorControl = true;
-  
   Serial.printf("[Web] Motor start at speed %d\n", manualMotorSpeed);
   server.send(200, "application/json", "{\"status\":\"started\"}");
 }
@@ -871,13 +976,11 @@ void handleMotorStop() {
 
 void pollHttpCommands() {
   if (WiFi.status() != WL_CONNECTED || webSocket.isConnected()) return;
-  
   HTTPClient http;
   secureClient.setInsecure();
   String url = String(serverHttps) + "/device/commands/" + machine_id;
-  
   if (!http.begin(secureClient, url)) return;
-  
+
   int httpCode = http.GET();
   if (httpCode == 200) {
     String payload = http.getString();
@@ -886,10 +989,8 @@ void pollHttpCommands() {
       JsonArray cmds = doc["commands"].as<JsonArray>();
       for (JsonObject cmd : cmds) {
         const char *type = cmd["type"] | "";
-        
-        // Handle session messages via HTTP fallback
         if (strcmp(type, "session") == 0 || strcmp(type, "new_session") == 0) {
-          const char *token = cmd["token"];
+          const char *token  = cmd["token"];
           const char *cmdUrl = cmd["url"];
           if (token && cmdUrl) {
             currentSessionToken = String(token);
@@ -908,13 +1009,13 @@ void pollHttpCommands() {
         }
         else if (strcmp(type, "command") == 0) {
           const char *action = cmd["action"] | "";
-          if (strcmp(action, "dispense") == 0 && 
+          if (strcmp(action, "dispense") == 0 &&
               (state == STATE_IN_USE || state == STATE_IDLE)) {
             currentTransactionId = cmd["transaction_id"].as<String>();
             dispenseQuantity = cmd["duration"] | 1;
-            unsigned long duration = (cmd.containsKey("duration_sec")
+            unsigned long duration = cmd.containsKey("duration_sec")
               ? cmd["duration_sec"].as<unsigned long>() * 1000UL
-              : dispenseQuantity * BASE_RUN_TIME);
+              : dispenseQuantity * BASE_RUN_TIME;
             state = STATE_DISPENSING;
             stateEnteredAt = millis();
             displayDispensing(dispenseQuantity);
@@ -934,15 +1035,15 @@ void pollHttpCommands() {
 void setup() {
   Serial.begin(115200);
   Serial.println("\n\n=============================");
-  Serial.println(" SmartVend ESP32 v3.0 Boot");
+  Serial.println(" SmartVend ESP32 v3.1 Boot");
   Serial.println("=============================");
 
-  // Watchdog (10 second timeout)
+  // Watchdog
   Serial.println("[WDT] Configuring watchdog...");
   esp_task_wdt_config_t wdt_config = {
-    .timeout_ms = 10000,
+    .timeout_ms   = 10000,
     .idle_core_mask = (1 << portNUM_PROCESSORS) - 1,
-    .trigger_panic = true
+    .trigger_panic  = true
   };
   esp_task_wdt_reconfigure(&wdt_config);
   esp_task_wdt_add(NULL);
@@ -957,22 +1058,11 @@ void setup() {
   digitalWrite(LED_BUILTIN_PIN, LOW);
   motorStop();
 
-  // OLED Display
-  Wire.begin();  // SDA=21, SCL=22 (default ESP32)
-  
-  if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_I2C_ADDR)) {
-    Serial.println("[OLED] SSD1306 init FAILED!");
-  } else {
-    Serial.println("[OLED] SSD1306 initialized");
-    
-    // I2C DATA FIX: Drop to 100kHz for stable data wires
-    Wire.setClock(100000); 
-    
-    // (Contrast logic handled in displayQRCode method now)
-  }
-  
-  display.clearDisplay();
-  display.display();
+  // TFT Display init
+  tft.init();
+  tft.setRotation(0);   // Portrait (240×320)
+  tft.fillScreen(TFT_BLACK);
+  Serial.println("[TFT] ILI9341 initialized (240x320)");
 
   // Boot screen
   displayBootScreen("Connecting WiFi...");
@@ -994,22 +1084,21 @@ void setup() {
     displayOffline();
     state = STATE_OFFLINE;
     stateEnteredAt = millis();
-    // Continue anyway — WS will auto-reconnect
   }
 
   // HTTPS client
-  secureClient.setInsecure();  // TODO: pin CA for production
+  secureClient.setInsecure();
 
-  // WebSocket (wss://)
+  // WebSocket
   webSocket.beginSSL(serverHost, serverPort, serverPath);
   webSocket.onEvent(webSocketEvent);
   webSocket.setReconnectInterval(5000);
 
-  // Web server (local control panel)
+  // Web server
   server.on("/", handleRoot);
   server.on("/status", handleStatus);
   server.on("/motor/start", HTTP_POST, handleMotorStart);
-  server.on("/motor/stop", HTTP_POST, handleMotorStop);
+  server.on("/motor/stop",  HTTP_POST, handleMotorStop);
   server.begin();
 
   Serial.printf("[Web] Control panel: http://%s\n", WiFi.localIP().toString().c_str());
@@ -1031,9 +1120,7 @@ void loop() {
   if (now - lastWiFiCheck > WIFI_CHECK_INTERVAL) {
     if (WiFi.status() != WL_CONNECTED) {
       Serial.println("[WiFi] Disconnected! Reconnecting...");
-      if (state == STATE_IDLE) {
-        displayBootScreen("Reconnecting WiFi");
-      }
+      if (state == STATE_IDLE) displayBootScreen("Reconnecting WiFi");
       connectToBestWiFi();
     }
     lastWiFiCheck = now;
@@ -1041,9 +1128,7 @@ void loop() {
 
   // ── Heartbeat (every 30s, only when idle) ──
   if (state == STATE_IDLE && now - lastHeartbeat > HEARTBEAT_INTERVAL) {
-    if (webSocket.isConnected()) {
-      sendPong();  // Keepalive
-    }
+    if (webSocket.isConnected()) sendPong();
     lastHeartbeat = now;
   }
 
@@ -1053,35 +1138,26 @@ void loop() {
     lastCommandPoll = now;
   }
 
-  // ── State: IDLE — QR is displayed, no action needed ──
-  // (QR rotation is handled by server sending new_session via WS/sweeper)
-
-  // ── State: IN_USE — waiting for dispense command ──
+  // ── State: IN_USE — local timeout failsafe ──
   if (state == STATE_IN_USE) {
-    // Local timeout failsafe (10 min)
     if (now - stateEnteredAt > LOCK_TIMEOUT) {
       Serial.println("[Timeout] IN_USE timeout — returning to IDLE");
       state = STATE_IDLE;
       stateEnteredAt = now;
       claimedByName = "";
-      // Re-display QR if we have a valid session
-      if (currentSessionUrl.length() > 0) {
+      if (currentSessionUrl.length() > 0)
         displayQRCode(currentSessionUrl.c_str());
-      } else {
+      else
         displayBootScreen("Waiting for session");
-      }
-      // Tell server
       sendJSON("status", "timeout");
     }
   }
 
-  // ── State: DISPENSING — motor is running ──
+  // ── State: DISPENSING — motor running ──
   if (motorRunning) {
-    // Update dispensing animation
-    if (state == STATE_DISPENSING && !manualMotorControl) {
+    if (state == STATE_DISPENSING && !manualMotorControl)
       displayDispensing(dispenseQuantity);
-    }
-    
+
     // Jam detection
     int currentLevel = analogRead(JAM_SENSOR_PIN);
     if (currentLevel > JAM_CURRENT_THRESHOLD) {
@@ -1091,12 +1167,9 @@ void loop() {
         motorStop();
         motorRunning = false;
         jamStartTime = 0;
-        
         state = STATE_ERROR;
         stateEnteredAt = now;
         displayError("Motor Jam!");
-        
-        // Report to server
         sendJSON("error", "motor_jam");
         return;
       }
@@ -1104,15 +1177,11 @@ void loop() {
       jamStartTime = 0;
     }
 
-    // Auto-stop when duration reached (not manual control)
+    // Auto-stop when duration reached
     if (!manualMotorControl && (now - motorStartTime > motorRunDuration)) {
       motorStop();
       motorRunning = false;
-      
-      // Send confirmation to server
       sendConfirmation(dispenseQuantity);
-      
-      // Show "Done!" briefly
       state = STATE_COMPLETED;
       stateEnteredAt = now;
       completedFlashStart = now;
@@ -1120,32 +1189,24 @@ void loop() {
     }
   }
 
-  // ── State: COMPLETED — brief flash, then wait for new_session from server ──
+  // ── State: COMPLETED — brief flash, wait for new_session ──
   if (state == STATE_COMPLETED) {
     if (now - completedFlashStart > COMPLETED_FLASH_MS) {
-      // If server hasn't sent new_session yet, show waiting screen
-      if (currentSessionUrl.length() > 0 && state == STATE_COMPLETED) {
-        // Server should have sent new_session by now (via confirm response or WS)
-        // If not, we'll get it soon from the sweeper
+      if (currentSessionUrl.length() > 0 && state == STATE_COMPLETED)
         displayBootScreen("Next customer...");
-      }
-      // Don't change state here — wait for server's "new_session" message
     }
   }
 
-  // ── State: OFFLINE — periodic retry ──
+  // ── State: OFFLINE — periodic display refresh ──
   if (state == STATE_OFFLINE) {
-    // Auto-recover when WS reconnects (handled by webSocketEvent)
-    // Display update every 10 seconds
     if (now - stateEnteredAt > 10000) {
       displayOffline();
       stateEnteredAt = now;
     }
   }
 
-  // ── State: ERROR — wait for manual resolution or timeout ──
+  // ── State: ERROR — auto-recovery after 60s ──
   if (state == STATE_ERROR) {
-    // Auto-recover after 60 seconds (try to get new session)
     if (now - stateEnteredAt > 60000) {
       Serial.println("[Error] Auto-recovery — requesting new session");
       state = STATE_BOOTING;

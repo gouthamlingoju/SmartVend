@@ -4,7 +4,7 @@ Connected vending machine platform with QR code-based session management.
 
 - **Backend**: FastAPI (WebSocket + REST, Supabase/Postgres, Redis)
 - **Frontend**: React (Vite + Tailwind) for users and admins
-- **Device**: ESP32 with OLED display for QR code generation and motor control
+- **Device**: ESP32 with 2.4" ILI9341 TFT display (8-bit parallel) for QR code generation and motor control
 
 ---
 
@@ -13,7 +13,7 @@ Connected vending machine platform with QR code-based session management.
 ```text
 ┌─────────────┐         ┌────────────────┐         ┌──────────────────┐
 │  ESP32 +    │◄──WS──►│  FastAPI        │◄──API──►│  React Frontend  │
-│  OLED       │         │  Backend       │         │  (Vite)          │
+│  TFT        │         │  Backend       │         │  (Vite)          │
 │  (QR Code)  │──HTTP──►│                │         │                  │
 └─────────────┘         │  Supabase DB   │         │  Razorpay SDK    │
                         │  Redis Pub/Sub │         └──────────────────┘
@@ -25,7 +25,7 @@ Connected vending machine platform with QR code-based session management.
 
 1. **ESP32 boots** → connects WiFi → WebSocket → registers with backend
 2. **Backend creates session** → sends session URL to ESP32
-3. **ESP32 generates QR code** on OLED display (128×64 px)
+3. **ESP32 generates QR code** on TFT display (240×320 px)
 4. **User scans QR** with phone camera → browser opens session URL
 5. **Frontend auto-claims session** → user selects quantity → pays via Razorpay
 6. **Backend triggers dispense** → ESP32 runs motor → confirms → new QR appears
@@ -36,7 +36,7 @@ Connected vending machine platform with QR code-based session management.
 |---|---|
 | `backend/` | FastAPI app: REST + WebSocket, session management, Razorpay |
 | `frontend/` | React UI: user vending flow + admin dashboard |
-| `ESP32/` | Arduino sketch for hardware (OLED + motor + QR) |
+| `ESP32/` | Arduino sketch for hardware (TFT + motor + QR) |
 
 ---
 
@@ -228,7 +228,7 @@ Open http://localhost:5173
 | Component | Purpose |
 |---|---|
 | ESP32 DevKit V1 | Main controller |
-| 0.96" OLED SSD1306 (128×64px) | QR code + status display |
+| 2.4" ILI9341 TFT (240×320px, 8-bit parallel) | QR code + status display |
 | L298N Motor Driver | Motor control |
 | Current Sensor (GPIO 34) | Jam detection |
 
@@ -236,7 +236,7 @@ Open http://localhost:5173
 
 | Library | Purpose |
 |---|---|
-| **Adafruit SSD1306** + **Adafruit GFX** | OLED driver |
+| **TFT_eSPI** | ILI9341 TFT driver |
 | **QRCode** (by ricmoo) | QR bitmap generation |
 | **WebSocketsClient** | WebSocket over TLS |
 | **ArduinoJson** | JSON parsing |
@@ -257,7 +257,7 @@ BOOTING → IDLE → IN_USE → DISPENSING → COMPLETED → IDLE
                                         ERROR → IDLE (auto-recovery 60s)
 ```
 
-### OLED Displays
+### TFT Displays
 
 | State | Display |
 |---|---|
@@ -304,7 +304,7 @@ cd frontend && npm run dev
 
 ### ESP32
 - Serial Monitor: WiFi connected → WS connected → register → session token → QR rendered
-- OLED: Shows "SmartVend" header + QR code
+- TFT: Shows "SmartVend" header + QR code
 
 ---
 

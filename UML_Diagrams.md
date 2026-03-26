@@ -7,7 +7,7 @@ graph TB
     subgraph Actors
         User["👤 User"]
         Admin["🔧 Admin"]
-        ESP32["⚙️ ESP32 + OLED"]
+        ESP32["⚙️ ESP32 + TFT"]
         Razorpay["💳 Razorpay"]
     end
 
@@ -25,7 +25,7 @@ graph TB
         UC11["Update Stock"]
         UC12["View Feedback"]
         UC13["Register Machine via WS"]
-        UC14["Render QR on OLED"]
+        UC14["Render QR on TFT"]
         UC15["Receive Dispense Command"]
         UC16["Confirm Dispensing"]
         UC17["Report Error / Jam"]
@@ -218,14 +218,14 @@ sequenceDiagram
     participant API as FastAPI Backend
     participant DB as Supabase DB
     participant WS as WebSocket
-    participant ESP as ESP32 + OLED
+    participant ESP as ESP32 + TFT
     participant RP as Razorpay
 
     Note over ESP,API: Boot & Registration
     ESP->>API: WS: register(M001, api_key)
     API->>DB: upsert machine + create session
     API-->>ESP: WS: { type: "session", token, url }
-    ESP->>ESP: Generate QR bitmap → render on OLED
+    ESP->>ESP: Generate QR bitmap → render on TFT
 
     Note over User,ESP: QR Scan Flow
     User->>ESP: Scans QR with phone camera
@@ -238,7 +238,7 @@ sequenceDiagram
     API->>DB: UPDATE machines SET status='in_use'
     API-->>FE: { status: "in_progress", expires_at }
     API->>ESP: WS: { type: "claimed", claimed_by_name: "Goutham" }
-    ESP->>ESP: OLED: "SmartVend" + "IN USE" + "Goutham"
+    ESP->>ESP: TFT: "SmartVend" + "IN USE" + "Goutham"
 
     Note over User,RP: Payment Flow
     User->>FE: Select qty=2, click Pay ₹20
@@ -260,13 +260,13 @@ sequenceDiagram
     API->>DB: Check idempotency, create transaction
     API->>DB: UPDATE sessions SET status='dispensing'
     API->>ESP: WS: { type: "command", action: "dispense", duration: 2, tx_id }
-    ESP->>ESP: OLED: "SmartVend" + "Dispensing..." + progress bar
+    ESP->>ESP: TFT: "SmartVend" + "Dispensing..." + progress bar
     ESP->>ESP: Motor runs → stops
     ESP->>API: POST /confirm { tx_id, dispensed: 2 }
     API->>DB: Complete transaction + session
     API->>DB: Create new session (new token)
     API->>ESP: WS: { type: "new_session", token: "pR7nWm4K", url: "..." }
-    ESP->>ESP: Generate new QR → render on OLED
+    ESP->>ESP: Generate new QR → render on TFT
     API-->>FE: Success
     FE->>User: Show success popup → feedback form 🎉
 ```
@@ -278,7 +278,7 @@ sequenceDiagram
     participant Sweeper as Session Expiry Sweeper
     participant API as FastAPI Backend
     participant DB as Supabase DB
-    participant ESP as ESP32 + OLED
+    participant ESP as ESP32 + TFT
 
     Note over Sweeper: Runs every 10 seconds
     loop Every 10 seconds
@@ -287,14 +287,14 @@ sequenceDiagram
             Sweeper->>DB: UPDATE session SET status='expired'
             Sweeper->>DB: CREATE new session for machine
             Sweeper->>ESP: WS: { type: "new_session", token, url }
-            ESP->>ESP: Generate new QR → render on OLED
+            ESP->>ESP: Generate new QR → render on TFT
         else In_progress session expired (user abandoned)
             Sweeper->>DB: UPDATE session SET status='expired'
             Sweeper->>DB: Release reserved stock (if any)
             Sweeper->>DB: SET machine status='idle'
             Sweeper->>DB: CREATE new session for machine
             Sweeper->>ESP: WS: { type: "new_session", token, url }
-            ESP->>ESP: Generate new QR → render on OLED
+            ESP->>ESP: Generate new QR → render on TFT
         end
     end
 ```
@@ -369,7 +369,7 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    A([Start]) --> B["Scan QR on machine OLED"]
+    A([Start]) --> B["Scan QR on machine TFT"]
     B --> C["Phone opens /vend/M001/xK9mBq2P"]
     C --> D{"Session status?"}
 
@@ -421,14 +421,14 @@ stateDiagram-v2
     BOOTING --> IDLE : WiFi + WS connected + registered
 
     state IDLE {
-        ShowQR : OLED shows SmartVend + QR code
+        ShowQR : TFT shows SmartVend + QR code
         WaitScan : Awaiting user scan
         [*] --> ShowQR
         ShowQR --> WaitScan
     }
 
     state IN_USE {
-        ShowInUse : OLED shows SmartVend + In Use + name
+        ShowInUse : TFT shows SmartVend + In Use + name
         WaitPayment : Awaiting dispense command
         [*] --> ShowInUse
         ShowInUse --> WaitPayment
@@ -446,17 +446,17 @@ stateDiagram-v2
     }
 
     state COMPLETED {
-        ShowDone : OLED shows SmartVend + Done! + checkmark
+        ShowDone : TFT shows SmartVend + Done! + checkmark
         [*] --> ShowDone
     }
 
     state ERROR {
-        ShowError : OLED shows SmartVend + Error message
+        ShowError : TFT shows SmartVend + Error message
         [*] --> ShowError
     }
 
     state OFFLINE {
-        ShowOffline : OLED shows SmartVend + Offline
+        ShowOffline : TFT shows SmartVend + Offline
         Reconnecting : Auto-retry every 30s
         [*] --> ShowOffline
         ShowOffline --> Reconnecting
@@ -565,7 +565,7 @@ graph TB
     end
 
     subgraph "Hardware"
-        ESP["ESP32 + OLED<br/>QR Code + Motor"]
+        ESP["ESP32 + TFT<br/>QR Code + Motor"]
     end
 
     Phone --> Browser

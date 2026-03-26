@@ -2,7 +2,7 @@
 SmartVend v3.0 — Cloud Backend
 ================================
 Session-based QR vending system.
-ESP32 connects via WebSocket → gets session token → renders QR on OLED.
+ESP32 connects via WebSocket → gets session token → renders QR on TFT.
 User scans QR → claims session → pays → dispenses.
 
 Phase 1: Backend session system (this file).
@@ -323,7 +323,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         if session:
                             base_url = FRONTEND_URL or "https://smartvend.onrender.com"
                             token = session.get("session_token")
-                            url = f"{base_url}/s/{token}"
+                            url = f"{base_url}/vend/{machine_id}/{token}"
                             await websocket.send_text(json.dumps({
                                 "type": "session",
                                 "token": token,
@@ -336,7 +336,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             if new_session:
                                 base_url = FRONTEND_URL or "https://smartvend.onrender.com"
                                 token = new_session.get("session_token")
-                                url = f"{base_url}/s/{token}"
+                                url = f"{base_url}/vend/{machine_id}/{token}"
                                 await websocket.send_text(json.dumps({
                                     "type": "session",
                                     "token": token,
@@ -484,7 +484,7 @@ async def claim_session(request: Request):
     machine_id = result.get("machine_id")
     session = result.get("session", {})
 
-    # Send "claimed" notification to ESP32 → OLED switches from QR to "In Use"
+    # Send "claimed" notification to ESP32 → TFT switches from QR to "In Use"
     if result.get("status") == "claimed":
         await _send_to_machine(machine_id, {
             "type": "claimed",
@@ -559,7 +559,7 @@ async def cancel_session(request: Request):
         if new_session:
             base_url = FRONTEND_URL or "https://smartvend.onrender.com"
             token = new_session.get("session_token")
-            url = f"{base_url}/s/{token}"
+            url = f"{base_url}/vend/{machine_id}/{token}"
             await _send_to_machine(machine_id, {
                 "type": "new_session",
                 "token": token,
@@ -1159,7 +1159,7 @@ async def lock_by_code_deprecated(request: Request):
         {
             "error": "deprecated",
             "message": "This endpoint is deprecated. Use /api/session/claim with QR scan instead.",
-            "migration": "v3.0 uses QR codes on OLED. Scan the QR code on the machine to claim a session.",
+            "migration": "v3.0 uses QR codes on TFT. Scan the QR code on the machine to claim a session.",
         },
         status_code=410,
     )

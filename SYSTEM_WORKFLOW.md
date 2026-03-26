@@ -1,6 +1,6 @@
 # SmartVend — Production System Workflow (v3.0 — QR-Based)
 
-> Revised with OLED QR code upgrade. Code-entry flow replaced entirely by scan-to-claim.
+> Revised with TFT QR code upgrade. Code-entry flow replaced entirely by scan-to-claim.
 
 ---
 
@@ -9,7 +9,7 @@
 ```text
 ESP32 → boots → WebSocket connect → registers → gets session_token from backend
 ↓
-OLED renders QR code: https://smartvend.onrender.com/vend/{machine_id}/{session_token}
+TFT renders QR code: https://smartvend.onrender.com/vend/{machine_id}/{session_token}
 ↓
 User scans QR with phone camera → browser opens session URL
 ↓
@@ -28,7 +28,7 @@ System ready for next user
 
 | Aspect | v2.0 (Code Entry) | v3.0 (QR Scan) |
 |---|---|---|
-| **Hardware** | 16×2 LCD | 0.96" OLED (SSD1306, 128×64) |
+| **Hardware** | 16×2 LCD | 2.4" TFT (ILI9341, 240×320, 8-bit parallel) |
 | **User action** | Type 6-digit code into app | Scan QR with phone camera |
 | **Session ID** | 6-digit display_code (collision risk) | UUID/token (cryptographic, unique) |
 | **Entry point** | User navigates to app, selects machine | QR URL opens specific machine + session directly |
@@ -51,7 +51,7 @@ EXPIRED      EXPIRED                    (new ACTIVE)
 
 > **Terminology guide**: `claimed` = verb (the action of scanning QR). `in_progress` = session state. `in_use` = machine status.
 
-| Session State | DB: `sessions.status` | DB: `machines.status` | Duration | OLED Display |
+| Session State | DB: `sessions.status` | DB: `machines.status` | Duration | TFT Display |
 |---|---|---|---|---|
 | **ACTIVE** | `'active'` | `'idle'` | 30–60 sec (QR rotation) | QR code shown |
 | **IN_PROGRESS** | `'in_progress'`, `claimed_by = client_id` | `'in_use'` | 2–5 min (payment timeout) | "In Use" / user name |
@@ -175,16 +175,16 @@ CREATE TABLE IF NOT EXISTS events (
 
 ## 🖥️ ESP32 Hardware Changes
 
-### Display: 0.96" OLED SSD1306 (128×64 pixels)
+### Display: 2.4" TFT ILI9341 (240×320 pixels, 8-bit parallel)
 
 **Libraries required**:
-- `Adafruit_SSD1306` + `Adafruit_GFX` — OLED driver
+- `TFT_eSPI` — ILI9341 TFT driver (parallel mode)
 - `qrcode.h` (QRCode library by ricmoo) — QR generation on-device
 
 **QR Code Constraints**:
-- 128×64 pixel display → QR code gets ~64×64 pixels (left half or centered)
-- QR Version 6 supports up to ~134 characters (Low ECC) — enough for our URL
-- Keep URL as short as possible: use short session tokens (e.g., 8-char base62)
+- 240×320 display allows large QR rendering (up to ~200×200)
+- QR Version 4+ with LOW ECC is sufficient for session URL length
+- Keep URL compact: short session tokens improve readability/scanning speed
 
 ### Optimized Token Format
 
@@ -196,14 +196,14 @@ Full URL: https://smartvend.onrender.com/vend/M001/xK9mBq2P
                                               8-char base62 (62^8 = 218 trillion combinations)
 ```
 
-Total URL length: ~55 chars → QR Version 4 (fits cleanly in 64×64 px)
+Total URL length: ~55 chars → renders clearly on TFT at high module scale
 
 **Backend generates**: `secrets.token_urlsafe(6)` → 8 base64url chars
 
 ### ESP32 Display Modes
 
 ```text
-State ACTIVE:       [QR code rendered, 64×64 px]  or  QR + "Scan Me" text
+State ACTIVE:       [QR code rendered, large centered area] or QR + "Scan Me" text
 State IN_PROGRESS:  "In Use"  +  user name (if sent)
 State DISPENSING:   "Dispensing..."  +  animation
 State COMPLETED:    "Done! ✓"  (brief flash)
@@ -227,7 +227,7 @@ Backend:
 ESP32:
   1. Receives session URL
   2. Generates QR code bitmap from URL using qrcode library
-  3. Renders on OLED (64×64 pixels)
+  3. Renders on TFT (large centered QR area)
 ↓
 User → walks up to machine → scans QR with phone camera
 ↓
@@ -248,7 +248,7 @@ Backend:
   5. Send WS to ESP32: { type: "claimed", claimed_by_name: "Goutham" }
   6. Log event: session_claimed
 ↓
-ESP32 → OLED shows "In Use" + "Goutham"
+ESP32 → TFT shows "In Use" + "Goutham"
 ↓
 Frontend → shows quantity selector + machine info
 ↓
@@ -278,7 +278,7 @@ Backend:
   4. Update session status = 'dispensing'
   5. Send WS: { type: "command", action: "dispense", duration: 2, transaction_id: "txn_xxx" }
 ↓
-ESP32 → OLED "Dispensing..." → motor runs for 2 × 4000ms
+ESP32 → TFT "Dispensing..." → motor runs for 2 × 4000ms
 ↓
 ESP32 → motor stops → POST /api/machine/M001/confirm { transaction_id, dispensed: 2 }
 ↓
@@ -290,7 +290,7 @@ Backend:
   5. Send WS: { type: "new_session", token: "pR7nWm4K", url: "...new QR URL..." }
   6. Check low stock → email if needed
 ↓
-ESP32 → generates new QR from new URL → renders on OLED
+ESP32 → generates new QR from new URL → renders on TFT
 ↓
 Frontend → shows success popup → feedback form
 ```
@@ -314,7 +314,7 @@ Session Expiry Sweeper:
   → For each expired: create new session for that machine
   → Send WS: { type: "new_session", token: "NEW_TOKEN", url: "...new URL..." }
 ↓
-ESP32 → receives new session → generates new QR → renders on OLED
+ESP32 → receives new session → generates new QR → renders on TFT
 ```
 
 ✅ Automatic rotation  
@@ -493,7 +493,7 @@ Backend:
   2. Expires any old active/in_progress session for this machine
   3. Creates new session → sends token + URL to ESP32
 ↓
-ESP32 → generates QR → displays on OLED
+ESP32 → generates QR → displays on TFT
 ```
 
 ✅ Stateless device  
@@ -512,7 +512,7 @@ ESP32 → motor runs → current spike on GPIO 34 > threshold for > 200ms
 ESP32:
   1. motorStop()
   2. WS: { type: "error", error: "motor_jam", transaction_id: "txn_xxx" }
-  3. OLED: "Error! Contact Support"
+  3. TFT: "Error! Contact Support"
   4. Stays in current state (no auto-unlock)
 ↓
 Backend:
@@ -608,14 +608,14 @@ Frontend: "Invalid session. Please scan the QR code on the machine."
 ESP32 → health check fails → retries 5x with backoff
 ↓
 All fail:
-  OLED shows "Service Unavailable" (text mode, no QR)
+  TFT shows "Service Unavailable" (text mode, no QR)
   ESP32 retries every 30 sec
 ↓
 Backend comes up → ESP32 connects → registers → gets session → shows QR
 ```
 
 ✅ Graceful degradation  
-✅ Clear user feedback on OLED  
+✅ Clear user feedback on TFT  
 ✅ Auto-recovery
 
 ---
@@ -623,28 +623,28 @@ Backend comes up → ESP32 connects → registers → gets session → shows QR
 ## 🔄 1️⃣5️⃣ HIGH TRAFFIC
 
 ```text
-Machine M001 shows QR on OLED
+Machine M001 shows QR on TFT
 ↓
 User A scans QR → POST /api/session/claim → session claimed ✅
 ↓
 Backend → WS: { type: "claimed", name: "User A" } → ESP32
 ↓
-ESP32 → OLED switches from QR to "In Use - User A"
+ESP32 → TFT switches from QR to "In Use - User A"
         (QR is NO LONGER visible on the machine)
 ↓
-User B walks up → sees "In Use" on OLED → knows to wait
+User B walks up → sees "In Use" on TFT → knows to wait
 ↓
 User B, C CANNOT scan (no QR displayed!)
 ↓
 Tiny race window: If User B scanned the QR in the ~100ms before
-OLED updated → backend returns 409 "Already claimed" → safe
+TFT updated → backend returns 409 "Already claimed" → safe
 ↓
 User A completes → backend creates new session → ESP32 renders new QR
 ↓
 User B sees new QR → scans → claims ✅
 ```
 
-✅ **Physical barrier**: QR removed from OLED on claim — others can't scan  
+✅ **Physical barrier**: QR removed from TFT on claim — others can't scan  
 ✅ **Backend barrier**: Even if scanned during race window → 409 rejection  
 ✅ Short cycles (30s idle + 5min max claim = fast turnover)  
 ✅ Fair: first to scan wins
@@ -817,14 +817,14 @@ sequenceDiagram
     participant API as FastAPI Backend
     participant DB as Supabase DB
     participant WS as WebSocket
-    participant ESP as ESP32 + OLED
+    participant ESP as ESP32 + TFT
     participant RP as Razorpay
 
     Note over ESP,API: Boot & Registration
     ESP->>API: WS: register(M001, api_key)
     API->>DB: upsert machine + create session
     API-->>ESP: WS: { type: "session", token, url }
-    ESP->>ESP: Generate QR bitmap → render on OLED
+    ESP->>ESP: Generate QR bitmap → render on TFT
 
     Note over User,ESP: QR Scan Flow
     User->>ESP: Scans QR with phone camera
@@ -834,7 +834,7 @@ sequenceDiagram
     API->>DB: UPDATE machines SET status='in_use'
     API-->>FE: { status: "in_progress", machine_id, expires_at }
     API->>ESP: WS: { type: "claimed", name: "Goutham" }
-    ESP->>ESP: OLED shows "In Use - Goutham"
+    ESP->>ESP: TFT shows "In Use - Goutham"
 
     Note over User,RP: Payment Flow
     User->>FE: Select qty=2, click Pay
@@ -862,7 +862,7 @@ sequenceDiagram
     API->>DB: Complete transaction + session
     API->>DB: Create new session (new token)
     API->>ESP: WS: { type: "new_session", token: "pR7nWm4K", url: "..." }
-    ESP->>ESP: Generate new QR → render on OLED
+    ESP->>ESP: Generate new QR → render on TFT
     API-->>FE: Success
     FE->>User: Show success popup 🎉
 ```
@@ -888,12 +888,12 @@ sequenceDiagram
 - [x] Stock release on cancel / session expiry (via sweeper)
 - [x] Deprecated old endpoints (`/api/lock-by-code`, `/api/machine/{id}/unlock`, etc.) → 410 Gone
 
-### Phase 2: ESP32 — OLED + QR ✅ COMPLETE
-- [x] Replace LiquidCrystal_I2C with Adafruit_SSD1306 + Adafruit_GFX
+### Phase 2: ESP32 — TFT + QR ✅ COMPLETE
+- [x] Replace legacy display stack with TFT_eSPI (ILI9341 parallel mode)
 - [x] Add QRCode library (qrcode by ricmoo)
 - [x] Handle new WS message types: `session`, `claimed`, `new_session`
 - [x] Generate QR bitmap from session URL
-- [x] Display QR on OLED (left 64px) + "SmartVend" header on all screens
+- [x] Display large QR on TFT + "SmartVend" header on all screens
 - [x] Display "In Use" + name when claimed
 - [x] Display "Dispensing..." + progress bar during motor run
 - [x] Display "Offline" / "Service Unavailable" when backend is down

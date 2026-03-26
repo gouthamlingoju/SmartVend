@@ -4,7 +4,7 @@
  * URL: /vend/:machineId/:sessionToken
  * 
  * Flow:
- *   1. User scans QR on OLED → opens this page
+ *   1. User scans QR on TFT → opens this page
  *   2. Auto-claim session on page load (POST /api/session/claim)
  *   3. Select quantity → Pay via Razorpay
  *   4. Trigger dispense (POST /api/session/trigger-dispense)
