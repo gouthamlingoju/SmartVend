@@ -409,6 +409,22 @@ export default function VendingSession() {
     return () => clearTimeout(t);
   }, [showPopup]);
 
+  // ── Auto-redirect terminal states (expired / completed) ──
+  useEffect(() => {
+    if (phase !== PHASE.EXPIRED && phase !== PHASE.COMPLETED) return;
+
+    const timeout = setTimeout(() => {
+      if (phase === PHASE.EXPIRED) {
+        alert("This session has expired. Redirecting to home.");
+      } else {
+        alert("Payment completed. Redirecting to home.");
+      }
+      navigate("/");
+    }, 5000);
+
+    return () => clearTimeout(timeout);
+  }, [phase, navigate]);
+
   // ── Quantity handlers ──
   const handleIncrement = () => {
     if (selectedPads < 5 && selectedPads < availablePads) {
@@ -449,6 +465,25 @@ export default function VendingSession() {
           <h2 className="text-xl font-bold text-gray-800 mb-2">QR Code Expired</h2>
           <p className="text-gray-600 mb-6">{errorMessage}</p>
           <p className="text-sm text-gray-500">A new QR code is displayed on the machine. Please scan it to continue.</p>
+          <p className="text-sm text-amber-700 mt-3 font-medium">Redirecting to home in 5 seconds...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Completed ──
+  if (phase === PHASE.COMPLETED) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center bg-gradient-to-b from-green-50 to-emerald-100 p-6">
+        <div className="bg-white rounded-2xl shadow-lg p-8 max-w-sm w-full text-center">
+          <div className="w-16 h-16 mx-auto bg-green-100 rounded-full flex items-center justify-center mb-4">
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-10 w-10 text-green-600" viewBox="0 0 20 20" fill="currentColor">
+              <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+            </svg>
+          </div>
+          <h2 className="text-xl font-bold text-gray-800 mb-2">Payment Successful</h2>
+          <p className="text-gray-600 mb-2">Dispense command sent to machine.</p>
+          <p className="text-sm text-green-700 font-medium">Redirecting to home in 5 seconds...</p>
         </div>
       </div>
     );
